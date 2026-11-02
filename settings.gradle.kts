@@ -1,4 +1,4 @@
-rootProject.name = "Airvana"
+rootProject.name = "Airvox"
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 
 pluginManagement {

@@ -22,6 +22,8 @@ fun javaString(value: String): String {
 dependencies {
     implementation(projects.shared)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.compose.ui)
+    implementation(libs.maplibre)
     implementation(libs.okhttp)
     implementation(libs.play.services.nearby)
     implementation(libs.stream.webrtc)
@@ -30,14 +32,14 @@ dependencies {
 }
 
 android {
-    namespace = "com.airvana"
+    namespace = "com.airvox"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
 
     buildFeatures {
         buildConfig = true
     }
     defaultConfig {
-        applicationId = "com.airvana"
+        applicationId = "com.airvox"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1

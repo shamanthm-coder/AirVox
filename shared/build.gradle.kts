@@ -19,7 +19,7 @@ kotlin {
     }
 
     android {
-        namespace = "com.airvana.shared"
+        namespace = "com.airvox.shared"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
         minSdk = libs.versions.android.minSdk.get().toInt()
         compilerOptions {
@@ -43,5 +43,5 @@ kotlin {
 
 compose.resources {
     publicResClass = true
-    packageOfResClass = "com.airvana.generated.resources"
+    packageOfResClass = "com.airvox.generated.resources"
 }

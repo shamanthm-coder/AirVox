@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="airvana_background">#070708</color>
+    <color name="airvox_background">#070708</color>
 
-    <style name="Theme.Airvana" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">@color/airvana_background</item>
-        <item name="android:navigationBarColor">@color/airvana_background</item>
-        <item name="android:windowBackground">@color/airvana_background</item>
+    <style name="Theme.Airvox" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/airvox_background</item>
+        <item name="android:navigationBarColor">@color/airvox_background</item>
+        <item name="android:windowBackground">@color/airvox_background</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:forceDarkAllowed">false</item>
     </style>

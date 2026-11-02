@@ -39,7 +39,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Airvana">
+        android:theme="@style/Theme.Airvox">
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|fontScale"
@@ -52,7 +52,7 @@
             </intent-filter>
         </activity>
         <service
-            android:name=".playback.AirvanaNotificationListener"
+            android:name=".playback.AirvoxNotificationListener"
             android:exported="true"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
