@@ -1,5 +1,6 @@
 package com.airvox.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,13 +21,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,27 +38,31 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.airvox.bluetooth.BluetoothEarphoneScanner
 import com.airvox.generated.resources.Res
 import com.airvox.generated.resources.airvox_logo
 import com.airvox.intercom.ChannelPath
 import com.airvox.intercom.Earphone
 import com.airvox.intercom.IntercomConnection
 import com.airvox.intercom.IntercomSession
+import com.airvox.playback.PlaybackController
 import com.airvox.vox.Vox
 import com.airvox.theme.AirvoxPalette
 import org.jetbrains.compose.resources.painterResource
@@ -63,17 +71,27 @@ import org.jetbrains.compose.resources.painterResource
 fun ChannelScreen(
     session: IntercomSession,
     vox: Vox,
-    activeAudioOutput: Earphone? = null,
+    playback: PlaybackController,
+    bluetoothScanner: BluetoothEarphoneScanner,
+    credits: Int,
+    onOpenPlans: () -> Unit,
 ) {
     val intercom by session.state
     val voxState by vox.state
+    val audio = bluetoothScanner.scanResult.value
     var roomCode by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var selectedPath by remember { mutableStateOf(ChannelPath.Hotspot) }
+    var creditNote by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        bluetoothScanner.refreshAudioOutput()
+        playback.refresh()
+    }
     val inRoom = intercom.connection == IntercomConnection.Connecting ||
         intercom.connection == IntercomConnection.Connected
     val shownPath = if (inRoom) intercom.path else selectedPath
     val voiceActive = intercom.localTalking || intercom.remoteTalking
+    val activeAudioOutput = audio.activeOutput
 
     Column(
         modifier = Modifier
@@ -85,66 +103,62 @@ fun ChannelScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SectionLabel("Channel")
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                StatusPill(
-                    when {
-                        voiceActive && voxState.enabled -> "Vox"
-                        voiceActive -> "Voice"
-                        intercom.connection == IntercomConnection.Connected -> intercom.path.label
-                        intercom.connection == IntercomConnection.Connecting -> "Joining"
-                        intercom.connection == IntercomConnection.Unavailable -> "Android"
-                        else -> "Off"
-                    },
-                )
-                HeaderIconButton(description = "Wallet", onClick = {}) {
-                    WalletIcon(tint = AirvoxPalette.White)
-                }
-                HeaderIconButton(
-                    description = "SOS",
-                    onClick = {},
-                    borderColor = SosRed,
-                ) {
-                    SosIcon(tint = SosRed)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(20.dp))
-
-        Box(contentAlignment = Alignment.Center) {
-            Box(
-                modifier = Modifier
-                    .size(160.dp)
-                    .background(
-                        Brush.radialGradient(
-                            listOf(Color.White.copy(alpha = 0.10f), Color.Transparent),
-                        ),
-                    ),
-            )
             Image(
                 painter = painterResource(Res.drawable.airvox_logo),
                 contentDescription = "Airvox",
-                modifier = Modifier.size(104.dp),
+                modifier = Modifier.size(28.dp),
                 contentScale = ContentScale.Fit,
+            )
+            Spacer(Modifier.size(8.dp))
+            Text(
+                text = "Airvox",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = AirvoxPalette.White,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = credits.toString(),
+                color = AirvoxPalette.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.size(8.dp))
+            HeaderIconButton(description = "Plans, $credits credits", onClick = onOpenPlans) {
+                WalletIcon(tint = AirvoxPalette.White)
+            }
+            Spacer(Modifier.size(8.dp))
+            HeaderIconButton(
+                description = "SOS",
+                onClick = {},
+                borderColor = SosRed,
+            ) {
+                SosIcon(tint = SosRed)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            StatusPill(
+                when {
+                    voiceActive && voxState.enabled -> "Vox"
+                    voiceActive -> "Voice"
+                    intercom.connection == IntercomConnection.Connected -> intercom.path.label
+                    intercom.connection == IntercomConnection.Connecting -> "Joining"
+                    intercom.connection == IntercomConnection.Unavailable -> "Android"
+                    else -> "Off"
+                },
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-        Text(text = "Airvox", style = MaterialTheme.typography.headlineLarge)
-        Spacer(Modifier.height(6.dp))
-        Text(
-            text = "Vox pauses the music when someone talks, and connects your voice to the other phone.",
-            style = MaterialTheme.typography.bodyMedium,
+        Spacer(Modifier.height(16.dp))
+        AudioControlCard(
+            playback = playback,
+            active = activeAudioOutput,
+            onRefresh = bluetoothScanner::refreshAudioOutput,
         )
-
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(16.dp))
         AirvoxCard {
             VoxRow(
                 enabled = voxState.enabled,
@@ -213,7 +227,14 @@ fun ChannelScreen(
             Spacer(Modifier.height(10.dp))
             OutlinedButton(
                 onClick = {
-                    if (inRoom) vox.leave() else vox.connect(roomCode, shownPath, password)
+                    when {
+                        inRoom -> vox.leave()
+                        credits < 1 -> creditNote = "Add credits on the Plans page. Joining uses 1 credit, even for a short stay."
+                        else -> {
+                            creditNote = null
+                            vox.connect(roomCode, shownPath, password)
+                        }
+                    }
                 },
                 enabled = intercom.connection != IntercomConnection.Unavailable,
                 modifier = Modifier
@@ -234,6 +255,10 @@ fun ChannelScreen(
                     },
                     fontWeight = FontWeight.Medium,
                 )
+            }
+            creditNote?.let { message ->
+                Spacer(Modifier.height(10.dp))
+                Text(text = message, color = AirvoxPalette.Muted, fontSize = 13.sp)
             }
         }
 
@@ -435,18 +460,49 @@ private fun ChannelField(
     onDone: () -> Unit,
     password: Boolean = false,
 ) {
+    var revealed by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val closeKeyboard = {
+        keyboard?.hide()
+        focusManager.clearFocus()
+    }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         enabled = enabled,
         singleLine = true,
         placeholder = { Text(placeholder) },
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        visualTransformation = if (password && !revealed) PasswordVisualTransformation() else VisualTransformation.None,
+        trailingIcon = if (password) {
+            {
+                IconButton(
+                    onClick = { revealed = !revealed },
+                    modifier = Modifier.semantics {
+                        contentDescription = if (revealed) "Hide password" else "Show password"
+                    },
+                ) {
+                    EyeIcon(visible = revealed, tint = AirvoxPalette.Muted)
+                }
+            }
+        } else {
+            null
+        },
         keyboardOptions = KeyboardOptions(
             keyboardType = if (password) KeyboardType.Password else KeyboardType.Text,
             imeAction = imeAction,
         ),
-        keyboardActions = KeyboardActions(onDone = { onDone() }),
+        keyboardActions = KeyboardActions(
+            onDone = {
+                closeKeyboard()
+                onDone()
+            },
+            onGo = {
+                closeKeyboard()
+                onDone()
+            },
+            onNext = { closeKeyboard() },
+        ),
         modifier = Modifier
             .fillMaxWidth()
             .semantics { contentDescription = placeholder },
@@ -466,6 +522,105 @@ private fun ChannelField(
             disabledContainerColor = Color.Transparent,
         ),
     )
+}
+
+@Composable
+private fun AudioControlCard(
+    playback: PlaybackController,
+    active: Earphone?,
+    onRefresh: () -> Unit,
+) {
+    val nowPlaying = playback.nowPlaying.value
+    AirvoxCard {
+        Text(
+            text = if (active != null) "Playing through" else "Earphones",
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = active?.name ?: "Phone speaker or wired headphones",
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(14.dp))
+        Text(
+            text = nowPlaying.title ?: "No song title yet",
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        val subtitle = listOfNotNull(nowPlaying.artist, nowPlaying.appName).joinToString(" · ")
+        if (subtitle.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = subtitle,
+                color = AirvoxPalette.Muted,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+        if (nowPlaying.accessRequired) {
+            Button(
+                onClick = playback::openAccessSettings,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AirvoxPalette.White,
+                    contentColor = AirvoxPalette.Black,
+                ),
+            ) {
+                Text("Allow notification access", fontWeight = FontWeight.Medium)
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                PlaybackAction("Previous", Modifier.weight(1f), playback::skipPrevious)
+                PlaybackAction(
+                    label = if (nowPlaying.paused) "Play" else "Pause",
+                    modifier = Modifier.weight(1f),
+                    onClick = playback::togglePlay,
+                )
+                PlaybackAction("Next", Modifier.weight(1f), playback::skipNext)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(
+            onClick = onRefresh,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(44.dp),
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, AirvoxPalette.Line),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = AirvoxPalette.White),
+        ) {
+            Text("Refresh earphones", fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+@Composable
+private fun PlaybackAction(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(44.dp),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, AirvoxPalette.Line),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = AirvoxPalette.White),
+    ) {
+        Text(label, fontSize = 13.sp, maxLines = 1)
+    }
 }
 
 private fun pathBlurb(path: ChannelPath, activeAudioOutput: Earphone?): String {

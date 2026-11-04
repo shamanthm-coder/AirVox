@@ -1,8 +1,12 @@
 package com.airvox.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -16,6 +20,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,18 +28,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.window.DialogProperties
+import com.airvox.auth.AuthClient
+import com.airvox.auth.AuthPhase
 import com.airvox.bluetooth.BluetoothEarphoneScanner
+import com.airvox.credits.CREDIT_PER_MINUTE
+import com.airvox.credits.CreditPlan
+import com.airvox.credits.CreditWallet
+import com.airvox.intercom.IntercomConnection
 import com.airvox.intercom.IntercomSession
 import com.airvox.location.PlaceReporter
 import com.airvox.map.RiderMap
 import com.airvox.playback.PlaybackController
 import com.airvox.theme.AirvoxPalette
 import com.airvox.vox.Vox
+import kotlinx.coroutines.delay
+
+// The portal counts a rider as online for 5 minutes after a check-in.
+private const val HEARTBEAT_MS = 120_000L
 
 private enum class Destination(val label: String) {
     Channel("Channel"),
     Map("Map"),
-    Earphones("Earphones"),
+    Plans("Plans"),
     Settings("Settings"),
 }
 
@@ -46,15 +61,130 @@ fun AirvoxApp(
     vox: Vox,
     places: PlaceReporter,
     map: RiderMap,
+    auth: AuthClient,
+    wallet: CreditWallet = CreditWallet(),
+    bindWallet: (String) -> Unit = {},
 ) {
-    var destination by remember { mutableStateOf(Destination.Channel) }
+    val signedInId = auth.state.value.account?.id
+    var destination by remember(signedInId) { mutableStateOf(Destination.Channel) }
+    var plans by remember { mutableStateOf<List<CreditPlan>>(emptyList()) }
     val snackbarHostState = remember { SnackbarHostState() }
-    val accessRequired = playback.nowPlaying.value.accessRequired
-    val location = places.reading.value
     var locationAnswered by remember { mutableStateOf(false) }
+    val authState = auth.state.value
+    var creatingAccount by remember { mutableStateOf(false) }
+    var opening by remember { mutableStateOf(true) }
+    var holdingRestore by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        delay(1600)
+        opening = false
+        // A saved sign-in talks to the server in the background. Do not leave the
+        // splash up if that call is slow or the phone cannot reach the server.
+        delay(2000)
+        holdingRestore = false
+    }
+    // Create account is only a choice on the signed-out screens. Leaving it set
+    // sent Sign out back there instead of the sign-in screen.
+    LaunchedEffect(authState.account?.id) {
+        if (authState.account == null) creatingAccount = false
+    }
+    val restoring = holdingRestore && auth.enforced && authState.account == null && authState.phase == AuthPhase.Restoring
+    if (opening || restoring) {
+        SplashScreen()
+        return
+    }
+    if (auth.enforced && authState.account == null) {
+        if (creatingAccount) {
+            CreateAccountScreen(
+                auth = auth,
+                onSignIn = {
+                    auth.clearError()
+                    creatingAccount = false
+                },
+            )
+        } else {
+            LoginScreen(
+                auth = auth,
+                onCreateAccount = {
+                    auth.clearError()
+                    creatingAccount = true
+                },
+            )
+        }
+        return
+    }
+    val signedIn = authState.account
+    var walletReady by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits) {
+        val account = signedIn
+        if (account == null) {
+            walletReady = null
+            return@LaunchedEffect
+        }
+        bindWallet(account.id)
+        if (account.welcomeCredits > 0) wallet.add(account.welcomeCredits)
+        walletReady = account.id
+    }
+    val shownCredits = wallet.state.value.credits
+    LaunchedEffect(signedIn?.id, shownCredits, walletReady) {
+        if (signedIn?.id == null || walletReady != signedIn.id) return@LaunchedEffect
+        val live = session.state.value
+        val onChannel = live.connection == IntercomConnection.Connected
+        auth.heartbeat(shownCredits, if (onChannel) live.roomCode else "", if (onChannel) live.path.label else "")
+    }
+    if (auth.enforced && authState.account?.profileComplete != true) {
+        ProfileScreen(auth)
+        return
+    }
+
+    // Tells the Airvox API this rider is online, so the admin portal can count them.
+    val riderId = authState.account?.id
+    LaunchedEffect(riderId) {
+        if (riderId == null) return@LaunchedEffect
+        while (true) {
+            delay(HEARTBEAT_MS)
+            val live = session.state.value
+            val onChannel = live.connection == IntercomConnection.Connected
+            auth.heartbeat(
+                wallet.state.value.credits,
+                if (onChannel) live.roomCode else "",
+                if (onChannel) live.path.label else "",
+            )
+        }
+    }
+
+    val connection = session.state.value.connection
+    val liveRoom = session.state.value.roomCode
+    val livePath = session.state.value.path
+    var openChannel by remember { mutableStateOf<Pair<String, String>?>(null) }
+    LaunchedEffect(connection, liveRoom, livePath) {
+        if (connection == IntercomConnection.Connected && liveRoom.isNotBlank()) {
+            auth.reportChannel(liveRoom, livePath.label, "join")
+            openChannel = liveRoom to livePath.label
+        } else if (openChannel != null && connection != IntercomConnection.Connected && connection != IntercomConnection.Connecting) {
+            val (room, mode) = openChannel ?: return@LaunchedEffect
+            auth.reportChannel(room, mode, "leave")
+            openChannel = null
+        }
+    }
+    LaunchedEffect(connection) {
+        if (connection != IntercomConnection.Connected) return@LaunchedEffect
+        while (session.state.value.connection == IntercomConnection.Connected) {
+            if (!wallet.spendMinute()) {
+                vox.leave()
+                return@LaunchedEffect
+            }
+            auth.recordCredits("consume", CREDIT_PER_MINUTE)
+            delay(60_000)
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        // Leave the keyboard out of the content padding. Including it resizes the
+        // screen on every frame of the keyboard animation and the field stays stuck.
+        contentWindowInsets = WindowInsets.systemBars.only(
+            WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
+        ),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             NavigationBar(containerColor = AirvoxPalette.Surface) {
@@ -68,7 +198,7 @@ fun AirvoxApp(
                             when (item) {
                                 Destination.Channel -> ChannelIcon(tint)
                                 Destination.Map -> MapIcon(tint)
-                                Destination.Earphones -> EarphoneIcon(tint)
+                                Destination.Plans -> WalletIcon(tint)
                                 Destination.Settings -> SettingsIcon(tint)
                             }
                         },
@@ -91,28 +221,51 @@ fun AirvoxApp(
                 .padding(innerPadding),
         ) {
             when (destination) {
-                Destination.Channel -> {
-                    val audioOutput = bluetoothScanner.scanResult.value.activeOutput
-                    ChannelScreen(
-                        session = session,
-                        vox = vox,
-                        activeAudioOutput = audioOutput,
-                    )
-                }
+                Destination.Channel -> ChannelScreen(
+                    session = session,
+                    vox = vox,
+                    playback = playback,
+                    bluetoothScanner = bluetoothScanner,
+                    credits = wallet.state.value.credits,
+                    onOpenPlans = { destination = Destination.Plans },
+                )
                 Destination.Map -> MapScreen(
                     session = session,
                     reporter = places,
                     map = map,
                 )
-                Destination.Earphones -> EarphonesScreen(
-                    playback = playback,
-                    bluetoothScanner = bluetoothScanner,
+                Destination.Plans -> PlansScreen(
+                    account = auth.state.value.account,
+                    balance = wallet.state.value,
+                    plans = plans,
+                    onRefresh = { auth.loadPlans { plans = it } },
+                    onBuy = { pack ->
+                        wallet.add(pack)
+                        auth.recordCredits("purchase", pack)
+                    },
                 )
-                Destination.Settings -> SettingsScreen()
+                Destination.Settings -> SettingsScreen(auth)
             }
         }
     }
 
+    PhonePrompts(
+        playback = playback,
+        places = places,
+        askForLocation = !locationAnswered,
+        onLocationAnswered = { locationAnswered = true },
+    )
+}
+
+@Composable
+private fun PhonePrompts(
+    playback: PlaybackController,
+    places: PlaceReporter,
+    askForLocation: Boolean,
+    onLocationAnswered: () -> Unit,
+) {
+    val accessRequired = playback.nowPlaying.value.accessRequired
+    val location = places.reading.value
     if (accessRequired) {
         AlertDialog(
             onDismissRequest = {},
@@ -141,15 +294,14 @@ fun AirvoxApp(
                 dismissOnClickOutside = false,
             ),
         )
-    } else if (!locationAnswered && (!location.allowed || !location.gpsOn)) {
-        // Asked once per launch; the Map tab keeps its own button for later.
+    } else if (askForLocation && (!location.allowed || !location.gpsOn)) {
         val needsPermission = !location.allowed
         AlertDialog(
-            onDismissRequest = { locationAnswered = true },
+            onDismissRequest = onLocationAnswered,
             confirmButton = {
                 Button(
                     onClick = {
-                        locationAnswered = true
+                        onLocationAnswered()
                         if (needsPermission) places.requestPermission() else places.openLocationSettings()
                     },
                     colors = ButtonDefaults.buttonColors(
@@ -164,7 +316,7 @@ fun AirvoxApp(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { locationAnswered = true }) {
+                TextButton(onClick = onLocationAnswered) {
                     Text("Not now", color = AirvoxPalette.Muted)
                 }
             },
