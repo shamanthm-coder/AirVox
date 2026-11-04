@@ -126,6 +126,30 @@ fun SosIcon(tint: Color, modifier: Modifier = Modifier) {
 }
 
 @Composable
+fun EyeIcon(visible: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(22.dp)) {
+        val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
+        val center = Offset(size.width / 2f, size.height / 2f)
+        drawOval(
+            color = tint,
+            topLeft = Offset(2.dp.toPx(), 6.2.dp.toPx()),
+            size = Size(size.width - 4.dp.toPx(), 9.6.dp.toPx()),
+            style = stroke,
+        )
+        drawCircle(color = tint, radius = 2.1.dp.toPx(), center = center)
+        if (visible) {
+            drawLine(
+                color = tint,
+                start = Offset(4.dp.toPx(), size.height - 4.5.dp.toPx()),
+                end = Offset(size.width - 4.dp.toPx(), 4.5.dp.toPx()),
+                strokeWidth = 1.7.dp.toPx(),
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+@Composable
 fun SettingsIcon(tint: Color, modifier: Modifier = Modifier) {
     Canvas(modifier.size(24.dp)) {
         val left = 4.dp.toPx()

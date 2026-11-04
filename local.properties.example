@@ -1,0 +1,33 @@
+# Copy to local.properties. That file is not committed.
+# Project URL and the publishable key (sb_publishable_...). The publishable key
+# goes in supabase.anon.key; the app sends it as the Realtime apikey.
+# supabase.url=https://YOUR_PROJECT.supabase.co
+# supabase.anon.key=
+
+# Firebase Android app. Either fill these in, or download google-services.json
+# into androidApp/ (also not committed). A value here wins over the json file.
+# firebase.api.key=
+# firebase.app.id=1:000000000000:android:0000000000000000000000
+# firebase.project.id=
+# firebase.sender.id=
+# Web client ID from Authentication → Sign-in method → Google. Required for Google sign-in.
+# firebase.web.client.id=
+
+# Where the phone sends the Firebase ID token.
+# Emulator: http://10.0.2.2:8080
+# A phone on the same Wi-Fi: http://<this-computer-lan-ip>:8080
+# airvox.api.url=http://10.0.2.2:8080
+
+# Server only: copies signed-in riders to Supabase (app_users and user_activity)
+# so the admin portal can count them. Use the service_role / secret key from
+# Supabase > Project Settings > API Keys. Never put it in the app or the portal.
+# Run Airvox-Portal/supabase/dashboard.sql first. Leave empty to keep riders in
+# server/data/riders.json only.
+# supabase.service.role.key=
+
+# Start the API from the Airvana folder:
+#   gradlew :server:run
+# The server reads firebase.project.id from this file.
+# In the Firebase console, enable Google and Email/Password.
+# Register the Android package com.airvox and add the debug SHA-1:
+#   gradlew :androidApp:signingReport

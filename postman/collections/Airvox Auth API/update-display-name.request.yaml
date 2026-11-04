@@ -1,0 +1,23 @@
+$kind: http-request
+name: Update display name
+method: PATCH
+url: '{{base_url}}/v1/me'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "displayName": "Asha"
+    }
+examples: './.resources/update-display-name.resources/examples'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test('name saved', function () {
+          pm.response.to.have.status(200);
+          pm.expect(pm.response.json().rider.displayName).to.eql('Asha');
+      });

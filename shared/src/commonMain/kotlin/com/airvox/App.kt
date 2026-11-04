@@ -1,6 +1,9 @@
 package com.airvox
 
 import androidx.compose.runtime.Composable
+import com.airvox.auth.AuthClient
+import com.airvox.auth.UnavailableAuthClient
+import com.airvox.credits.CreditWallet
 import com.airvox.bluetooth.BluetoothEarphoneScanner
 import com.airvox.bluetooth.UnavailableBluetoothEarphoneScanner
 import com.airvox.intercom.IntercomSession
@@ -24,6 +27,9 @@ fun App(
     vox: Vox = UnavailableVox(),
     places: PlaceReporter = UnavailablePlaceReporter(),
     map: RiderMap = UnavailableRiderMap(),
+    auth: AuthClient = UnavailableAuthClient(),
+    wallet: CreditWallet = CreditWallet(),
+    bindWallet: (String) -> Unit = {},
 ) {
     AirvoxTheme {
         AirvoxApp(
@@ -33,6 +39,9 @@ fun App(
             vox = vox,
             places = places,
             map = map,
+            auth = auth,
+            wallet = wallet,
+            bindWallet = bindWallet,
         )
     }
 }

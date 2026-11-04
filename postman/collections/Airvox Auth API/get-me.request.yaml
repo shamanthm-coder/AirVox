@@ -1,0 +1,14 @@
+$kind: http-request
+name: Get me
+method: GET
+url: '{{base_url}}/v1/me'
+order: 3000
+examples: './.resources/get-me.resources/examples'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test('profile returned', function () {
+          pm.response.to.have.status(200);
+          pm.expect(pm.response.json().rider.id).to.be.a('string').and.not.empty;
+      });

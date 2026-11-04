@@ -262,7 +262,7 @@ class AndroidIntercomSession(
         )
         internet = realtime
         realtime.connect(normalized, selfId, selfName)
-    }/
+    }
 
     private fun signalJoined(gen: Int) {
         if (gen != generation) return

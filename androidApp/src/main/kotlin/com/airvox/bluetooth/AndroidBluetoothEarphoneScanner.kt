@@ -117,7 +117,7 @@ class AndroidBluetoothEarphoneScanner(
             permissionLauncher.launch(requiredPermissions(PendingAction.Refresh))
             return
         }
-        if (adapter.isEnabled == false) {
+        if (!adapter.isEnabled) {
             update(
                 scanState.value.copy(
                     activeOutput = null,

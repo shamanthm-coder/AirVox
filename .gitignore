@@ -4,6 +4,9 @@
 **/build/
 xcuserdata
 local.properties
+androidApp/google-services.json
+res/google-services*.json
+server/data/
 .idea
 .DS_Store
 captures

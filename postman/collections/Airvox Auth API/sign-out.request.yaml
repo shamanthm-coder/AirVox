@@ -1,0 +1,13 @@
+$kind: http-request
+name: Sign out
+method: DELETE
+url: '{{base_url}}/v1/session'
+order: 5000
+examples: './.resources/sign-out.resources/examples'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test('sign-out acknowledged', function () {
+          pm.response.to.have.status(204);
+      });

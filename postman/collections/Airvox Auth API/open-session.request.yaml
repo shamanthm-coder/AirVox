@@ -1,0 +1,24 @@
+$kind: http-request
+name: Open session
+method: POST
+url: '{{base_url}}/v1/session'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {}
+examples: './.resources/open-session.resources/examples'
+scripts:
+  - type: afterResponse
+    language: text/javascript
+    code: |-
+      pm.test('session opened', function () {
+          pm.response.to.have.status(200);
+          const rider = pm.response.json().rider;
+          pm.expect(rider.id).to.be.a('string').and.not.empty;
+          pm.expect(rider.signInProvider).to.be.oneOf(['phone', 'google.com', 'password']);
+          pm.expect(rider.providers).to.be.an('array').that.is.not.empty;
+      });
