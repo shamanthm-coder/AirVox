@@ -1,0 +1,289 @@
+openapi: 3.0.3
+info:
+  title: Airvox Auth API
+  version: 1.0.0
+  description: |
+    Firebase Authentication is the identity provider. The Android app signs in
+    with Google, or with email and password. This API never receives the password.
+
+    After Firebase signs the rider in, the app sends the Firebase ID token.
+    The API checks the signature against Google's published certificates, then
+    creates or updates the rider profile.
+
+    Checking a token does not need a Firebase service account. Signing out of
+    the app drops the token on the phone. The token stays valid until it
+    expires, about one hour, because this API cannot revoke Firebase sessions
+    without a service account.
+
+    Email and password accounts can call this API before the rider opens the
+    verification email. Firebase still sends that email from the app. The API
+    does not reject `email_verified: false`.
+servers:
+  - url: http://localhost:8080
+    description: Local Airvox API
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Check that the API is running
+      responses:
+        '200':
+          description: The process is up. This does not check Firebase.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+  /v1/session:
+    post:
+      operationId: openSession
+      summary: Create or refresh the rider from a Firebase ID token
+      description: |
+        Call this after Google or email sign-in, and again when
+        the app restarts with a Firebase user. The same rider id is the
+        Firebase uid. A later call refreshes the phone number and email from
+        the token. A name the rider saved is kept.
+      security:
+        - firebaseIdToken: []
+      responses:
+        '200':
+          description: The rider profile, created on the first call.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiderResponse'
+              example:
+                rider:
+                  id: uid-1
+                  phoneNumber: '+919800000000'
+                  email: null
+                  displayName: null
+                  signInProvider: phone
+                  providers:
+                    - phone
+                  profileComplete: false
+                  createdAt: '2026-11-02T12:00:00Z'
+                  lastSeenAt: '2026-11-02T12:00:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+    delete:
+      operationId: closeSession
+      summary: Acknowledge sign-out
+      description: |
+        The phone still has to call Firebase sign-out. This call checks the
+        token and returns 204. It does not revoke the token.
+      security:
+        - firebaseIdToken: []
+      responses:
+        '204':
+          description: The token was valid. The phone should drop it locally.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: Read the rider profile
+      description: Returns the profile saved by openSession. It does not create one.
+      security:
+        - firebaseIdToken: []
+      responses:
+        '200':
+          description: The saved rider.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiderResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: This Firebase user has not opened a session yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                error: unknown_rider
+                message: Sign in again to create your Airvox profile.
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+    patch:
+      operationId: updateDisplayName
+      summary: Save the rider name or finish the profile
+      description: |
+        Creates the rider if this is the first authenticated call, then stores
+        the name. Send completeProfile true with a phone number to finish the
+        profile screen. A finished profile stays finished on later sign-ins.
+      security:
+        - firebaseIdToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisplayNameBody'
+            examples:
+              nameOnly:
+                value:
+                  displayName: Asha
+              finishProfile:
+                value:
+                  displayName: Asha
+                  phoneNumber: '+919812345678'
+                  completeProfile: true
+      responses:
+        '200':
+          description: The rider with the saved name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiderResponse'
+              example:
+                rider:
+                  id: uid-1
+                  phoneNumber: '+919800000000'
+                  email: null
+                  displayName: Asha
+                  signInProvider: phone
+                  providers:
+                    - phone
+                  profileComplete: true
+                  createdAt: '2026-11-02T12:00:00Z'
+                  lastSeenAt: '2026-11-02T12:00:30Z'
+        '400':
+          description: The name is blank, longer than 40 characters, or contains a line break.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              examples:
+                blank:
+                  value:
+                    error: invalid_name
+                    message: Use a name of 1 to 40 characters.
+                unreadable:
+                  value:
+                    error: invalid_body
+                    message: Send a display name.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/AuthUnavailable'
+components:
+  securitySchemes:
+    firebaseIdToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Firebase ID token for the signed-in rider. Send it as
+        `Authorization: Bearer <token>`. This is not an Airvox-issued secret.
+  responses:
+    Unauthorized:
+      description: |
+        The header is missing, or the token is expired, unsigned, or from
+        another Firebase project. Both cases use `invalid_token`. The phone
+        should sign in again.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          examples:
+            missing:
+              value:
+                error: invalid_token
+                message: Sign in again.
+            expired:
+              value:
+                error: invalid_token
+                message: Firebase ID token is expired. Sign in again.
+            wrongProvider:
+              value:
+                error: invalid_token
+                message: Use your mobile number, Google, or email to sign in.
+    AuthUnavailable:
+      description: Google's signing certificates could not be fetched. The token was not accepted or rejected. Retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: auth_unavailable
+            message: Could not reach Google to check the sign-in.
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ApiError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [invalid_token, auth_unavailable, unknown_rider, invalid_name, invalid_phone, invalid_body]
+        message:
+          type: string
+    DisplayNameBody:
+      type: object
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 40
+        phoneNumber:
+          type: string
+          description: Required when completeProfile is true. E.164, such as +919812345678.
+        completeProfile:
+          type: boolean
+          default: false
+          description: True finishes the profile screen and lets the rider into the app.
+    RiderResponse:
+      type: object
+      required: [rider]
+      properties:
+        rider:
+          $ref: '#/components/schemas/Rider'
+    Rider:
+      type: object
+      required: [id, signInProvider, providers, profileComplete, createdAt, lastSeenAt]
+      properties:
+        id:
+          type: string
+          description: Firebase uid.
+        phoneNumber:
+          type: string
+          nullable: true
+          description: E.164 number saved on the profile screen. Null until the rider finishes that screen.
+        email:
+          type: string
+          nullable: true
+        displayName:
+          type: string
+          nullable: true
+        signInProvider:
+          type: string
+          enum: [phone, google.com, password]
+          description: How this token was issued. The app uses google.com or password.
+        providers:
+          type: array
+          items:
+            type: string
+            enum: [phone, google.com, password]
+        profileComplete:
+          type: boolean
+          description: True after the rider saves the profile screen. Sign-in alone leaves this false.
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time

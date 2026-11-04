@@ -1,0 +1,28 @@
+$kind: http-example
+name: Phone sign-in
+order: 1000
+request:
+  method: POST
+  url: '{{base_url}}/v1/session'
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "rider": {
+          "id": "uid-1",
+          "phoneNumber": "+919800000000",
+          "email": null,
+          "displayName": null,
+          "signInProvider": "phone",
+          "providers": ["phone"],
+          "profileComplete": false,
+          "createdAt": "2026-11-02T12:00:00Z",
+          "lastSeenAt": "2026-11-02T12:00:00Z"
+        }
+      }

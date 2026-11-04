@@ -1,0 +1,19 @@
+$kind: http-example
+name: Missing token
+order: 2000
+request:
+  method: POST
+  url: '{{base_url}}/v1/session'
+response:
+  statusCode: 401
+  statusText: Unauthorized
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "invalid_token",
+        "message": "Sign in again."
+      }

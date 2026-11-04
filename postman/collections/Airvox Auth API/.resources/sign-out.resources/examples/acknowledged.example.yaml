@@ -1,0 +1,15 @@
+$kind: http-example
+name: Acknowledged
+order: 1000
+request:
+  method: DELETE
+  url: '{{base_url}}/v1/session'
+response:
+  statusCode: 204
+  statusText: No Content
+  headers:
+    - key: Content-Length
+      value: '0'
+  body:
+    type: text
+    content: ''

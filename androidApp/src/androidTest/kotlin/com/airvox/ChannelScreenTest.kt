@@ -21,7 +21,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ChannelScreenTest {
     @get:Rule
-    val activity = ActivityScenarioRule(MainActivity::class.java)
+    val activity = ActivityScenarioRule<MainActivity>(MainActivity.bypassAuthIntent())
 
     @Test
     fun joinWithoutSignalingSetupExplainsWhatIsMissing() {

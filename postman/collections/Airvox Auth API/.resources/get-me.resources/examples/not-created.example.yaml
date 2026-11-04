@@ -1,0 +1,19 @@
+$kind: http-example
+name: Profile not created yet
+order: 1000
+request:
+  method: GET
+  url: '{{base_url}}/v1/me'
+response:
+  statusCode: 404
+  statusText: Not Found
+  headers:
+    - key: Content-Type
+      value: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "error": "unknown_rider",
+        "message": "Sign in again to create your Airvox profile."
+      }

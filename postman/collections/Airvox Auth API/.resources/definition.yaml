@@ -1,0 +1,17 @@
+$kind: collection
+name: Airvox Auth API
+description: |-
+  Verifies a Firebase ID token and returns the Airvox rider.
+  The mobile app signs in with Google or email and password through Firebase.
+  This API never receives the password.
+variables:
+  - key: base_url
+    value: 'http://localhost:8080'
+  - key: firebase_id_token
+    value: ''
+    description: Paste a Firebase ID token from the signed-in app. Leave this empty in git.
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{firebase_id_token}}'
