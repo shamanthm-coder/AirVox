@@ -22,28 +22,69 @@ import platform.MapKit.MKFeatureVisibility
 import platform.MapKit.MKMapView
 import platform.MapKit.MKMapViewDelegateProtocol
 import platform.MapKit.MKMarkerAnnotationView
+import platform.MapKit.MKOverlayLevelAboveLabels
+import platform.MapKit.MKOverlayProtocol
+import platform.MapKit.addOverlay
+import platform.MapKit.removeOverlay
+import platform.MapKit.MKOverlayRenderer
 import platform.MapKit.MKPointAnnotation
+import platform.MapKit.MKTileOverlay
+import platform.MapKit.MKTileOverlayRenderer
+import platform.Network.nw_path_get_status
+import platform.Network.nw_path_monitor_create
+import platform.Network.nw_path_monitor_set_queue
+import platform.Network.nw_path_monitor_set_update_handler
+import platform.Network.nw_path_monitor_start
+import platform.Network.nw_path_status_satisfied
 import platform.UIKit.UIColor
 import platform.UIKit.UIUserInterfaceStyle
 import platform.darwin.NSObject
+import platform.darwin.dispatch_async
+import platform.darwin.dispatch_get_main_queue
 
 /**
- * Apple Maps for the iPhone. Android uses MapLibre; this screen was left on the
- * ring drawing because no iPhone map was connected.
+ * Apple Maps for the iPhone. Saved areas are dark street tiles kept on the
+ * phone, and they replace the Apple map when there is no internet.
  */
 @OptIn(ExperimentalForeignApi::class)
 class IosRiderMap : RiderMap {
     override val available: Boolean = true
-    override val savesOffline: Boolean = false
 
     private val stateHolder = mutableStateOf(RiderMapState())
     override val state: State<RiderMapState> = stateHolder
 
+    private val tiles = IosOfflineTiles { patch ->
+        onMain {
+            publish(
+                stateHolder.value.copy(
+                    saving = patch.saving,
+                    progress = patch.progress,
+                    savedAreas = patch.savedAreas,
+                    detail = patch.detail,
+                ),
+            )
+            syncOverlay()
+        }
+    }
+
     private var mapView: MKMapView? = null
+    private var overlay: MKTileOverlay? = null
+    private var offline = false
     private var riders: List<ChannelPlace> = emptyList()
     private var shownKey = ""
     private var framed = false
     private var ignoreMovesUntil = TimeSource.Monotonic.markNow()
+
+    init {
+        publish(stateHolder.value.copy(savedAreas = tiles.savedCount()))
+        val monitor = nw_path_monitor_create()
+        nw_path_monitor_set_queue(monitor, dispatch_get_main_queue())
+        nw_path_monitor_set_update_handler(monitor) { path ->
+            offline = path == null || nw_path_get_status(path) != nw_path_status_satisfied
+            syncOverlay()
+        }
+        nw_path_monitor_start(monitor)
+    }
 
     private val delegate = object : NSObject(), MKMapViewDelegateProtocol {
         override fun mapView(mapView: MKMapView, regionDidChangeAnimated: Boolean) {
@@ -71,6 +112,12 @@ class IosRiderMap : RiderMap {
             }
             return null
         }
+
+        override fun mapView(mapView: MKMapView, rendererForOverlay: MKOverlayProtocol): MKOverlayRenderer {
+            val tiles = rendererForOverlay as? MKTileOverlay
+            if (tiles != null) return MKTileOverlayRenderer(tiles)
+            return MKOverlayRenderer(rendererForOverlay)
+        }
     }
 
     @Composable
@@ -94,9 +141,43 @@ class IosRiderMap : RiderMap {
         mapView?.let { frame(it, animate = true) }
     }
 
-    override fun saveVisibleArea() = Unit
+    override fun saveVisibleArea() {
+        if (stateHolder.value.saving) return
+        val view = mapView
+        if (view == null) {
+            publish(stateHolder.value.copy(detail = "The map is still loading. Try again in a moment."))
+            return
+        }
+        val wideEnough = view.bounds.useContents { size.width >= 20.0 && size.height >= 20.0 }
+        if (!wideEnough) {
+            publish(stateHolder.value.copy(detail = "The map is still loading. Try again in a moment."))
+            return
+        }
+        val bounds = view.region.useContents {
+            val halfLat = span.latitudeDelta / 2.0
+            val halfLng = span.longitudeDelta / 2.0
+            if (halfLat <= 0.0 || halfLng <= 0.0) {
+                null
+            } else {
+                MapBounds(
+                    north = center.latitude + halfLat,
+                    south = center.latitude - halfLat,
+                    east = center.longitude + halfLng,
+                    west = center.longitude - halfLng,
+                )
+            }
+        }
+        if (bounds == null) {
+            publish(stateHolder.value.copy(detail = "The map is still loading. Try again in a moment."))
+            return
+        }
+        tiles.save(bounds)
+    }
 
-    override fun deleteSavedAreas() = Unit
+    override fun deleteSavedAreas() {
+        tiles.deleteAll()
+        syncOverlay()
+    }
 
     private fun createMap(): MKMapView {
         val view = MKMapView()
@@ -107,7 +188,28 @@ class IosRiderMap : RiderMap {
         view.showsCompass = false
         view.backgroundColor = UIColor.blackColor
         mapView = view
+        syncOverlay()
         return view
+    }
+
+    private fun syncOverlay() {
+        val view = mapView ?: return
+        val show = offline && tiles.hasTiles()
+        if (show && overlay == null) {
+            val tileOverlay = MKTileOverlay(uRLTemplate = tiles.template())
+            tileOverlay.setCanReplaceMapContent(true)
+            tileOverlay.minimumZ = IosOfflineTiles.MIN_ZOOM.toLong()
+            tileOverlay.maximumZ = IosOfflineTiles.MAX_ZOOM.toLong()
+            view.addOverlay(tileOverlay, MKOverlayLevelAboveLabels)
+            overlay = tileOverlay
+        } else if (!show && overlay != null) {
+            view.removeOverlay(overlay!!)
+            overlay = null
+        }
+    }
+
+    private fun onMain(block: () -> Unit) {
+        dispatch_async(dispatch_get_main_queue(), block)
     }
 
     private fun showRiders(places: List<ChannelPlace>) {

@@ -14,7 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -32,7 +31,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.airvox.auth.AuthClient
 import com.airvox.auth.providerLabel
-import com.airvox.platformLabel
 import com.airvox.theme.AirvoxPalette
 
 @Composable
@@ -121,13 +119,13 @@ fun SettingsScreen(auth: AuthClient) {
                         auth.signOut()
                     },
                     enabled = !busy && !signingOut,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = AirvoxPalette.SurfaceHigh,
-                        contentColor = AirvoxPalette.White,
-                        disabledContainerColor = AirvoxPalette.SurfaceHigh,
-                        disabledContentColor = AirvoxPalette.White,
+                        containerColor = SignOutRed,
+                        contentColor = Color.White,
+                        disabledContainerColor = SignOutRed.copy(alpha = 0.45f),
+                        disabledContentColor = Color.White,
                     ),
                 ) {
                     if (signingOut) {
@@ -137,7 +135,7 @@ fun SettingsScreen(auth: AuthClient) {
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(18.dp),
-                                color = AirvoxPalette.White,
+                                color = Color.White,
                                 strokeWidth = 2.dp,
                             )
                             Spacer(Modifier.width(10.dp))
@@ -160,14 +158,11 @@ fun SettingsScreen(auth: AuthClient) {
         }
         AirvoxCard {
             SettingRow(label = "Version", value = "1.0.0")
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 14.dp),
-                color = AirvoxPalette.Line,
-            )
-            SettingRow(label = "Device", value = platformLabel())
         }
     }
 }
+
+private val SignOutRed = Color(0xFFFF4D4D)
 
 @Composable
 private fun SettingRow(label: String, value: String) {

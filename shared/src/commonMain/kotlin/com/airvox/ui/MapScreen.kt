@@ -1,6 +1,9 @@
 package com.airvox.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ButtonDefaults
@@ -29,6 +33,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,14 +77,18 @@ fun MapScreen(
     if (expanded && map.available) {
         Box(modifier = Modifier.fillMaxSize()) {
             map.Show(self = self, others = others, modifier = Modifier.fillMaxSize())
-            Column(
+            Row(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                    .align(Alignment.BottomEnd)
+                    .padding(horizontal = 16.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                MapButton(text = "Recenter", onClick = map::recenter)
-                MapButton(text = "Small screen", onClick = { expanded = false })
+                MapIconButton(description = "Recenter", onClick = map::recenter) {
+                    RecenterIcon(tint = AirvoxPalette.White)
+                }
+                MapIconButton(description = "Leave full screen", onClick = { expanded = false }) {
+                    FullScreenIcon(exit = true, tint = AirvoxPalette.White)
+                }
             }
         }
         return
@@ -113,9 +125,17 @@ fun MapScreen(
                         .clip(RoundedCornerShape(14.dp)),
                 )
                 Spacer(Modifier.height(12.dp))
-                MapButton(text = "Recenter", onClick = map::recenter)
-                Spacer(Modifier.height(10.dp))
-                MapButton(text = "Full screen", onClick = { expanded = true })
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                ) {
+                    MapIconButton(description = "Recenter", onClick = map::recenter) {
+                        RecenterIcon(tint = AirvoxPalette.White)
+                    }
+                    MapIconButton(description = "Full screen", onClick = { expanded = true }) {
+                        FullScreenIcon(exit = false, tint = AirvoxPalette.White)
+                    }
+                }
             } else {
                 PlaceMap(self = self, others = others)
             }
@@ -206,6 +226,28 @@ fun MapScreen(
             }
         }
     }
+}
+
+@Composable
+private fun MapIconButton(
+    description: String,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clearAndSetSemantics {
+                role = Role.Button
+                contentDescription = description
+            }
+            .clip(CircleShape)
+            .background(AirvoxPalette.SurfaceHigh)
+            .border(width = 1.dp, color = AirvoxPalette.Line, shape = CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+        content = { icon() },
+    )
 }
 
 @Composable

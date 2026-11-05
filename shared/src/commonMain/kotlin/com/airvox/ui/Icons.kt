@@ -150,6 +150,103 @@ fun EyeIcon(visible: Boolean, tint: Color, modifier: Modifier = Modifier) {
 }
 
 @Composable
+fun RecenterIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(22.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val stroke = 1.7.dp.toPx()
+        drawCircle(
+            color = tint,
+            radius = 4.6.dp.toPx(),
+            center = center,
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+        drawCircle(color = tint, radius = 1.45.dp.toPx(), center = center)
+        val inner = 7.2.dp.toPx()
+        val outer = 10.2.dp.toPx()
+        listOf(
+            Offset(0f, -1f),
+            Offset(0f, 1f),
+            Offset(-1f, 0f),
+            Offset(1f, 0f),
+        ).forEach { direction ->
+            drawLine(
+                color = tint,
+                start = Offset(center.x + direction.x * inner, center.y + direction.y * inner),
+                end = Offset(center.x + direction.x * outer, center.y + direction.y * outer),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+@Composable
+fun FullScreenIcon(exit: Boolean, tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(22.dp)) {
+        val stroke = 1.7.dp.toPx()
+        val arm = 5.5.dp.toPx()
+        val pad = if (exit) 7.dp.toPx() else 3.5.dp.toPx()
+        val sign = if (exit) -1f else 1f
+        val corners = listOf(
+            Offset(pad, pad) to (1f to 1f),
+            Offset(size.width - pad, pad) to (-1f to 1f),
+            Offset(pad, size.height - pad) to (1f to -1f),
+            Offset(size.width - pad, size.height - pad) to (-1f to -1f),
+        )
+        corners.forEach { (origin, direction) ->
+            val (dx, dy) = direction
+            drawLine(
+                color = tint,
+                start = origin,
+                end = Offset(origin.x + dx * sign * arm, origin.y),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = tint,
+                start = origin,
+                end = Offset(origin.x, origin.y + dy * sign * arm),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+@Composable
+fun RefreshIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(22.dp)) {
+        val stroke = 1.7.dp.toPx()
+        val inset = 3.4.dp.toPx()
+        drawArc(
+            color = tint,
+            startAngle = 45f,
+            sweepAngle = 270f,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = Size(size.width - inset * 2, size.height - inset * 2),
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+        val tip = Offset(size.width - 4.6.dp.toPx(), 6.4.dp.toPx())
+        val arm = 4.4.dp.toPx()
+        drawLine(
+            color = tint,
+            start = Offset(tip.x - arm, tip.y),
+            end = tip,
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = tint,
+            start = tip,
+            end = Offset(tip.x, tip.y + arm),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
+@Composable
 fun SettingsIcon(tint: Color, modifier: Modifier = Modifier) {
     Canvas(modifier.size(24.dp)) {
         val left = 4.dp.toPx()
