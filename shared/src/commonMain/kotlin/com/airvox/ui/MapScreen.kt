@@ -121,7 +121,7 @@ fun MapScreen(
                 }
             }
         }
-        if (map.available) {
+        if (map.available && map.savesOffline) {
             Spacer(Modifier.height(16.dp))
             AirvoxCard {
                 Text(text = "Offline map", style = MaterialTheme.typography.titleMedium)

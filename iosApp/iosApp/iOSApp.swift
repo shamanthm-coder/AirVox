@@ -8,9 +8,11 @@ struct iOSApp: App {
         UIView.setAnimationsEnabled(false)
     }
 
+    private let voice = AirvoxWebRtc()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(voice: voice)
         }
     }
 }

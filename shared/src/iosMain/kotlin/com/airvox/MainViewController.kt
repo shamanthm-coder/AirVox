@@ -9,10 +9,12 @@ import com.airvox.credits.bindUserCredits
 import com.airvox.credits.markOffsetRemoved
 import com.airvox.credits.offsetAlreadyRemoved
 import com.airvox.intercom.IosIntercomSession
+import com.airvox.intercom.IosVoiceCall
 import com.airvox.location.IosPlaceReporter
+import com.airvox.map.IosRiderMap
 import com.airvox.vox.IosVox
 
-fun MainViewController() = ComposeUIViewController(
+fun MainViewController(voice: IosVoiceCall) = ComposeUIViewController(
     // The default waits to slide the field above the keyboard before showing it.
     // On iPhone that wait is about 10 seconds. Show the keyboard immediately.
     configure = {
@@ -20,14 +22,16 @@ fun MainViewController() = ComposeUIViewController(
     },
 ) {
     val places = remember { IosPlaceReporter() }
+    val map = remember { IosRiderMap() }
     val auth = remember { IosAuthClient(IosConfig.FIREBASE_API_KEY, IosConfig.AIRVOX_API_URL) }
     val wallet = remember { CreditWallet() }
-    val session = remember { IosIntercomSession() }
+    val session = remember { IosIntercomSession(voice) }
     val vox = remember { IosVox(session) }
     App(
         session = session,
         vox = vox,
         places = places,
+        map = map,
         auth = auth,
         wallet = wallet,
         bindWallet = { userId -> bindUserCredits(wallet, userId) },

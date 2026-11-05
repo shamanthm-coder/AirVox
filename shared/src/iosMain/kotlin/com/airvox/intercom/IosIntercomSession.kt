@@ -7,15 +7,16 @@ import kotlin.random.Random
 import kotlinx.cinterop.BetaInteropApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import platform.AVFAudio.AVAudioSession
-import platform.AVFAudio.AVAudioSessionCategoryPlayAndRecord
-import platform.AVFAudio.setActive
 import platform.Foundation.NSData
 import platform.Foundation.NSError
 import platform.Foundation.NSString
@@ -24,6 +25,7 @@ import platform.Foundation.NSURL
 import platform.Foundation.NSURLSession
 import platform.Foundation.NSURLSessionConfiguration
 import platform.Foundation.NSURLSessionWebSocketMessage
+import platform.Foundation.NSUUID
 import platform.Foundation.create
 import platform.Foundation.dataUsingEncoding
 import platform.MultipeerConnectivity.MCNearbyServiceAdvertiser
@@ -36,20 +38,27 @@ import platform.MultipeerConnectivity.MCSessionDelegateProtocol
 import platform.MultipeerConnectivity.MCSessionSendDataMode
 import platform.MultipeerConnectivity.MCSessionState
 import platform.UIKit.UIDevice
+import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.NSObject
+import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_main_queue
+import platform.darwin.dispatch_time
 
 /**
- * Opens a voice channel on iPhone. Bluetooth and Hotspot find nearby phones.
- * Internet uses the same Supabase room Android uses, so the channel is created either way.
+ * Opens a voice channel on iPhone.
+ * Internet uses the same Supabase room and WebRTC call as Android, so the phones can hear each other.
+ * Bluetooth and Hotspot still find nearby iPhones, then use that same WebRTC call for the audio.
  */
 @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
-class IosIntercomSession : IntercomSession {
+class IosIntercomSession(
+    private val voice: IosVoiceCall,
+) : IntercomSession {
     private val stateHolder = mutableStateOf(IntercomState())
     override val state: State<IntercomState> = stateHolder
 
     private val selfName = UIDevice.currentDevice.name.ifBlank { "iPhone" }
+    private val selfId = NSUUID().UUIDString.lowercase()
     private val peerId = MCPeerID(displayName = "$selfName ${Random.nextInt(100, 999)}")
     private val json = Json { ignoreUnknownKeys = true }
     private var generation = 0
@@ -58,7 +67,11 @@ class IosIntercomSession : IntercomSession {
     private var connection = IntercomConnection.Disconnected
     private var detail: String? = null
     private var localTalking = false
-    private val members = linkedMapOf<String, String>()
+    private var channelReady = false
+    private val presence = linkedMapOf<String, String>()
+    private val meshRoster = linkedMapOf<String, String>()
+    private val meshNames = linkedMapOf<String, String>()
+    private val peers = linkedMapOf<String, VoicePeer>()
     private var advertiser: MCNearbyServiceAdvertiser? = null
     private var browser: MCNearbyServiceBrowser? = null
     private var mesh: MCSession? = null
@@ -66,31 +79,35 @@ class IosIntercomSession : IntercomSession {
     private var pendingRoom: String? = null
     private var pendingSecret: String? = null
     private var pendingPath = ChannelPath.Hotspot
+    private var currentKey: String? = null
+
+    init {
+        voice.attach(VoiceListener())
+    }
 
     private val sessionDelegate = object : NSObject(), MCSessionDelegateProtocol {
-        override fun session(session: MCSession, peer: MCPeerID, didChangeState: platform.MultipeerConnectivity.MCSessionState) {
+        override fun session(session: MCSession, peer: MCPeerID, didChangeState: MCSessionState) {
             onMain {
+                if (path == ChannelPath.Internet) return@onMain
                 if (didChangeState == MCSessionState.MCSessionStateConnected) {
-                    members[peer.displayName] = peer.displayName
-                    send(buildJsonObject {
+                    sendSignal(buildJsonObject {
                         put("kind", "hello")
                         put("name", selfName)
                     })
-                    markConnected()
                 } else if (didChangeState == MCSessionState.MCSessionStateNotConnected) {
-                    members.remove(peer.displayName)
-                    if (members.isEmpty() && connection == IntercomConnection.Connected) {
-                        connection = IntercomConnection.Connecting
-                        detail = waitingDetail()
+                    val id = meshNames.remove(peer.displayName)
+                    if (id != null) {
+                        meshRoster.remove(id)
+                        closePeer(id)
                     }
-                    publish()
+                    refreshConnection()
                 }
             }
         }
 
         override fun session(session: MCSession, didReceiveData: NSData, fromPeer: MCPeerID) {
             val text = NSString.create(data = didReceiveData, encoding = platform.Foundation.NSUTF8StringEncoding)?.toString() ?: return
-            onMain { handle(text, fromPeer.displayName) }
+            onMain { handleSignal(text, mcName = fromPeer.displayName) }
         }
 
         override fun session(
@@ -157,8 +174,6 @@ class IosIntercomSession : IntercomSession {
         }
     }
 
-    private var currentKey: String? = null
-
     override fun join(roomCode: String, path: ChannelPath, password: String) {
         val normalized = roomCode.trim().lowercase().filter { it.isLetterOrDigit() }.take(16)
         val secret = password.trim().take(32)
@@ -200,7 +215,8 @@ class IosIntercomSession : IntercomSession {
         connection = IntercomConnection.Disconnected
         detail = "Left the channel."
         localTalking = false
-        members.clear()
+        presence.clear()
+        meshRoster.clear()
         publish()
     }
 
@@ -211,32 +227,45 @@ class IosIntercomSession : IntercomSession {
             return
         }
         localTalking = talking
-        send(buildJsonObject {
+        voice.setMicEnabled(talking)
+        sendSignal(buildJsonObject {
             put("kind", "talk")
             put("talking", talking)
         })
-        if (!talking && members.isEmpty()) {
-            detail = waitingDetail()
-        }
         publish()
     }
 
     private fun startJoin(normalized: String, selected: ChannelPath, password: String) {
         generation++
+        val gen = generation
         tearDown()
         path = selected
         roomCode = normalized
         localTalking = false
-        members.clear()
+        channelReady = false
+        presence.clear()
+        meshRoster.clear()
+        meshNames.clear()
         connection = IntercomConnection.Connecting
-        detail = waitingDetail()
+        detail = joiningDetail(normalized)
         publish()
+        if (selected == ChannelPath.Internet && !internetConfigured()) {
+            connection = IntercomConnection.Disconnected
+            detail = "Add supabase.url and supabase.anon.key in local.properties, then rebuild, to use internet voice."
+            publish()
+            return
+        }
+        voice.prepare(selected == ChannelPath.Internet)
         val key = channelKey(normalized, password)
         currentKey = key
-        runCatching { AVAudioSession.sharedInstance().setCategory(AVAudioSessionCategoryPlayAndRecord, error = null) }
-        runCatching { AVAudioSession.sharedInstance().setActive(true, null) }
-        openNearby(key)
-        if (selected == ChannelPath.Internet) openInternet(key)
+        if (selected == ChannelPath.Internet) {
+            openInternet(key, gen)
+        } else {
+            channelReady = true
+            openNearby(key)
+            detail = waitingDetail()
+            publish()
+        }
     }
 
     private fun openNearby(key: String) {
@@ -254,61 +283,127 @@ class IosIntercomSession : IntercomSession {
         browser = browsing
     }
 
-    private fun openInternet(key: String) {
+    private fun openInternet(key: String, gen: Int) {
         val url = IosConfig.SUPABASE_URL
         val anon = IosConfig.SUPABASE_ANON_KEY
-        if (url.isBlank() || anon.isBlank()) {
-            detail = "Add supabase.url and supabase.anon.key in local.properties, then rebuild, to use internet voice."
-            publish()
-            return
-        }
         realtime = IosRealtime(
             supabaseUrl = url,
             anonKey = anon,
-            onPeer = { id, name ->
+            onJoined = {
                 onMain {
-                    members[id] = name
-                    markConnected()
+                    if (gen != generation) return@onMain
+                    channelReady = true
+                    detail = waitingDetail()
+                    publish()
+                    syncPeers()
                 }
             },
-            onSignal = { text -> onMain { handle(text, "internet") } },
+            onPresence = { members ->
+                onMain {
+                    if (gen != generation) return@onMain
+                    presence.clear()
+                    presence.putAll(members)
+                    publish()
+                    if (channelReady) syncPeers()
+                }
+            },
+            onSignal = { text -> onMain { if (gen == generation) handleSignal(text) } },
             onClosed = { reason ->
                 onMain {
-                    if (connection == IntercomConnection.Connecting || connection == IntercomConnection.Connected) {
-                        detail = reason
-                        publish()
-                    }
+                    if (gen != generation) return@onMain
+                    tearDown()
+                    connection = IntercomConnection.Disconnected
+                    detail = reason
+                    publish()
                 }
             },
         )
-        realtime?.connect(key, selfName)
+        realtime?.connect(key, selfId, selfName)
     }
 
-    private fun handle(text: String, from: String) {
-        val body = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-        when (body.string("kind")) {
+    private fun handleSignal(text: String, mcName: String? = null) {
+        val message = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        val from = message.string("from") ?: return
+        if (from == selfId) return
+        val to = message.string("to").orEmpty()
+        if (to.isNotEmpty() && to != selfId) return
+        if (mcName != null) meshNames[mcName] = from
+        when (message.string("kind")) {
             "hello" -> {
-                val name = body.string("name") ?: from
-                members[from] = name
-                markConnected()
+                if (path == ChannelPath.Internet) return
+                meshRoster[from] = message.string("name") ?: "iPhone"
+                syncPeers()
+            }
+            "offer" -> {
+                if (path != ChannelPath.Internet && meshRoster[from] == null) {
+                    meshRoster[from] = "iPhone"
+                }
+                val link = peers[from] ?: openPeer(from)
+                if (selfId > from && link.offerSent) return
+                val sdp = message.string("sdp").orEmpty()
+                if (sdp.isBlank()) return
+                voice.acceptOffer(from, sdp)
+            }
+            "answer" -> {
+                if (peers[from] == null) return
+                val sdp = message.string("sdp").orEmpty()
+                if (sdp.isBlank()) return
+                voice.acceptAnswer(from, sdp)
+            }
+            "ice" -> {
+                if (peers[from] == null) return
+                voice.addIce(
+                    peerId = from,
+                    sdpMid = message.string("sdpMid").orEmpty(),
+                    sdpMLineIndex = message.int("sdpMLineIndex"),
+                    candidate = message.string("candidate").orEmpty(),
+                )
             }
             "talk" -> {
-                val name = members[from] ?: from
-                members[from] = name
+                val link = peers[from] ?: return
+                link.talking = message.bool("talking")
+                voice.setRemoteTalking(from, link.talking)
                 publish()
+            }
+            "bye" -> {
+                closePeer(from)
+                if (path == ChannelPath.Internet) presence.remove(from) else meshRoster.remove(from)
+                refreshConnection()
             }
         }
     }
 
-    private fun send(body: JsonObject) {
-        val text = body.toString()
-        val data = NSString.create(string = text).dataUsingEncoding(platform.Foundation.NSUTF8StringEncoding) ?: return
-        val live = mesh
-        val peers = live?.connectedPeers.orEmpty()
-        if (live != null && peers.isNotEmpty()) {
-            live.sendData(data, peers, MCSessionSendDataMode.MCSessionSendDataReliable, null)
+    private fun syncPeers() {
+        val others = roster().filterKeys { it != selfId }
+        (peers.keys - others.keys).forEach { closePeer(it) }
+        others.keys.forEach { other ->
+            val link = peers[other] ?: openPeer(other)
+            if (selfId > other && !link.offerSent) {
+                link.offerSent = true
+                voice.createOffer(other)
+            }
         }
-        realtime?.send(text)
+        refreshConnection()
+    }
+
+    private fun refreshConnection() {
+        if (peers.values.any { it.iceConnected }) {
+            markConnected()
+            return
+        }
+        if (connection == IntercomConnection.Disconnected) {
+            publish()
+            return
+        }
+        connection = IntercomConnection.Connecting
+        detail = if (roster().any { it.key != selfId }) {
+            "Connecting voice to the other phone…"
+        } else if (channelReady) {
+            waitingDetail()
+        } else {
+            detail
+        }
+        publish()
     }
 
     private fun markConnected() {
@@ -319,6 +414,51 @@ class IosIntercomSession : IntercomSession {
             ChannelPath.Internet -> "Internet channel is open. Tap Talk to speak."
         }
         publish()
+    }
+
+    private fun openPeer(id: String): VoicePeer {
+        val created = VoicePeer()
+        peers[id] = created
+        voice.openPeer(id)
+        return created
+    }
+
+    private fun closePeer(id: String) {
+        if (peers.remove(id) == null) return
+        voice.closePeer(id)
+    }
+
+    private fun sendSignal(fields: JsonObject, to: String? = null) {
+        val signal = buildJsonObject {
+            for ((key, value) in fields) put(key, value)
+            put("from", selfId)
+            put("to", to ?: "")
+        }
+        if (path == ChannelPath.Internet) {
+            realtime?.send(signal)
+        } else {
+            sendMesh(signal.toString())
+        }
+    }
+
+    private fun sendMesh(text: String) {
+        val data = NSString.create(string = text).dataUsingEncoding(platform.Foundation.NSUTF8StringEncoding) ?: return
+        val live = mesh ?: return
+        val others = live.connectedPeers
+        if (others.isEmpty()) return
+        live.sendData(data, others, MCSessionSendDataMode.MCSessionSendDataReliable, null)
+    }
+
+    private fun roster(): Map<String, String> = if (path == ChannelPath.Internet) presence else meshRoster
+
+    private fun internetConfigured(): Boolean {
+        return IosConfig.SUPABASE_URL.isNotBlank() && IosConfig.SUPABASE_ANON_KEY.isNotBlank()
+    }
+
+    private fun joiningDetail(room: String): String = when (path) {
+        ChannelPath.Bluetooth -> "Looking over Bluetooth for $room…"
+        ChannelPath.Hotspot -> "Opening a hotspot for $room…"
+        ChannelPath.Internet -> "Joining $room over the internet…"
     }
 
     private fun waitingDetail(): String = when (path) {
@@ -337,20 +477,29 @@ class IosIntercomSession : IntercomSession {
         realtime?.close()
         realtime = null
         currentKey = null
-        runCatching { AVAudioSession.sharedInstance().setActive(false, null) }
+        channelReady = false
+        peers.clear()
+        voice.stop()
     }
 
     private fun publish() {
-        val names = members.values.distinct()
         stateHolder.value = IntercomState(
             roomCode = roomCode,
             connection = connection,
             path = path,
-            members = names.map { IntercomMember(id = it, name = it, talking = false) },
+            members = memberList(),
             localTalking = localTalking,
-            remoteTalking = false,
+            remoteTalking = peers.values.any { it.talking },
             detail = detail,
         )
+    }
+
+    private fun memberList(): List<IntercomMember> {
+        if (connection == IntercomConnection.Disconnected) return emptyList()
+        val others = roster()
+            .filterKeys { it != selfId }
+            .map { (id, name) -> IntercomMember(id = id, name = name, talking = peers[id]?.talking == true) }
+        return listOf(IntercomMember(selfId, "$selfName (you)", localTalking)) + others
     }
 
     private fun channelKey(room: String, password: String): String {
@@ -363,6 +512,93 @@ class IosIntercomSession : IntercomSession {
         if (NSThread.isMainThread) block() else dispatch_async(dispatch_get_main_queue(), block)
     }
 
+    private inner class VoiceListener : IosVoiceListener {
+        override fun onLocalOffer(peerId: String, sdp: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation || peers[peerId] == null) return@onMain
+                sendSignal(buildJsonObject {
+                    put("kind", "offer")
+                    put("sdp", sdp)
+                }, to = peerId)
+            }
+        }
+
+        override fun onLocalAnswer(peerId: String, sdp: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation || peers[peerId] == null) return@onMain
+                sendSignal(buildJsonObject {
+                    put("kind", "answer")
+                    put("sdp", sdp)
+                }, to = peerId)
+            }
+        }
+
+        override fun onIceCandidate(peerId: String, sdpMid: String, sdpMLineIndex: Int, candidate: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation || peers[peerId] == null || candidate.isBlank()) return@onMain
+                sendSignal(buildJsonObject {
+                    put("kind", "ice")
+                    put("sdpMid", sdpMid)
+                    put("sdpMLineIndex", sdpMLineIndex)
+                    put("candidate", candidate)
+                }, to = peerId)
+            }
+        }
+
+        override fun onConnected(peerId: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation) return@onMain
+                val link = peers[peerId] ?: return@onMain
+                link.iceConnected = true
+                markConnected()
+            }
+        }
+
+        override fun onDropped(peerId: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation) return@onMain
+                closePeer(peerId)
+                syncPeers()
+                if (peers.values.none { it.iceConnected }) {
+                    connection = IntercomConnection.Connecting
+                    detail = "Voice to one phone dropped. Waiting to reconnect."
+                    publish()
+                }
+            }
+        }
+
+        override fun onUnreachable(peerId: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation || peers[peerId]?.iceConnected == true) return@onMain
+                if (path == ChannelPath.Internet) {
+                    detail = "Could not reach that phone over the internet."
+                    publish()
+                }
+            }
+        }
+
+        override fun onError(message: String) {
+            val gen = generation
+            onMain {
+                if (gen != generation) return@onMain
+                detail = message.ifBlank { "Could not open the voice channel." }
+                publish()
+            }
+        }
+    }
+
+    private class VoicePeer {
+        var offerSent: Boolean = false
+        var iceConnected: Boolean = false
+        var talking: Boolean = false
+    }
+
     private companion object {
         const val SERVICE = "airvox-ch"
     }
@@ -370,12 +606,19 @@ class IosIntercomSession : IntercomSession {
 
 private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull?.ifBlank { null }
 
-/** Supabase Realtime presence, same topic Android uses for an internet channel. */
+private fun JsonObject.int(key: String): Int = (this[key] as? JsonPrimitive)?.intOrNull ?: 0
+
+private fun JsonObject.bool(key: String): Boolean = (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
+
+private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
+
+/** Supabase Realtime room. Same topic and signal envelope Android uses. Voice stays on WebRTC. */
 @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
 private class IosRealtime(
     private val supabaseUrl: String,
     private val anonKey: String,
-    private val onPeer: (String, String) -> Unit,
+    private val onJoined: () -> Unit,
+    private val onPresence: (Map<String, String>) -> Unit,
     private val onSignal: (String) -> Unit,
     private val onClosed: (String) -> Unit,
 ) {
@@ -385,9 +628,12 @@ private class IosRealtime(
     private var joinRef = "1"
     private var ref = 2
     private var closedByUs = false
+    private var heartbeats = 0
+    private val members = linkedMapOf<String, String>()
 
-    fun connect(roomKey: String, displayName: String) {
+    fun connect(roomKey: String, peerId: String, displayName: String) {
         closedByUs = false
+        members.clear()
         topic = "realtime:airvox:$roomKey"
         val host = supabaseUrl.trim().removePrefix("https://").removePrefix("http://").trimEnd('/')
         val url = NSURL.URLWithString("wss://$host/realtime/v1/websocket?apikey=$anonKey&vsn=1.0.0") ?: return
@@ -406,7 +652,7 @@ private class IosRealtime(
                     })
                     put("presence", buildJsonObject {
                         put("enabled", true)
-                        put("key", displayName)
+                        put("key", peerId)
                     })
                     put("private", false)
                 })
@@ -414,11 +660,12 @@ private class IosRealtime(
             put("ref", joinRef)
             put("join_ref", joinRef)
         }.toString())
+        scheduleHeartbeat()
         listen(displayName)
     }
 
-    fun send(signal: String) {
-        val body = buildJsonObject {
+    fun send(signal: JsonObject) {
+        sendRaw(buildJsonObject {
             put("topic", topic)
             put("event", "broadcast")
             put("payload", buildJsonObject {
@@ -428,14 +675,28 @@ private class IosRealtime(
             })
             put("ref", nextRef())
             put("join_ref", joinRef)
-        }
-        sendRaw(body.toString())
+        }.toString())
     }
 
     fun close() {
         closedByUs = true
+        heartbeats += 1
         task?.cancel()
         task = null
+    }
+
+    private fun scheduleHeartbeat() {
+        val ticket = heartbeats
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25_000_000_000), dispatch_get_main_queue()) {
+            if (closedByUs || ticket != heartbeats || task == null) return@dispatch_after
+            sendRaw(buildJsonObject {
+                put("topic", "phoenix")
+                put("event", "heartbeat")
+                put("payload", buildJsonObject { })
+                put("ref", nextRef())
+            }.toString(), reportError = false)
+            scheduleHeartbeat()
+        }
     }
 
     private fun listen(displayName: String) {
@@ -454,9 +715,13 @@ private class IosRealtime(
 
     private fun handle(text: String, displayName: String) {
         val message = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
+        val eventTopic = message.string("topic").orEmpty()
+        if (eventTopic.isNotEmpty() && eventTopic != topic && eventTopic != "phoenix") return
         when (message.string("event")) {
             "phx_reply" -> {
-                if (message.string("ref") == joinRef) {
+                if (message.string("ref") != joinRef) return
+                val payload = message.obj("payload")
+                if (payload?.string("status") == "ok") {
                     sendRaw(buildJsonObject {
                         put("topic", topic)
                         put("event", "presence")
@@ -468,26 +733,50 @@ private class IosRealtime(
                         put("ref", nextRef())
                         put("join_ref", joinRef)
                     }.toString())
+                    onJoined()
+                } else {
+                    val response = payload?.obj("response")
+                    val reason = response?.string("reason")
+                        ?: payload?.string("response")
+                        ?: "The channel rejected this room."
+                    onClosed(reason)
                 }
             }
-            "presence_state", "presence_diff" -> onPeer(displayName, displayName)
+            "presence_state" -> {
+                members.clear()
+                readPresence(message.obj("payload"), members)
+                onPresence(members.toMap())
+            }
+            "presence_diff" -> {
+                val payload = message.obj("payload") ?: return
+                readPresence(payload.obj("joins"), members)
+                payload.obj("leaves")?.keys?.forEach { key -> members.remove(key) }
+                onPresence(members.toMap())
+            }
             "broadcast" -> {
-                val payload = message["payload"] as? JsonObject ?: return
-                val inner = payload["payload"]
-                val signal = when (inner) {
-                    is JsonPrimitive -> inner.content
-                    is JsonObject -> inner.toString()
-                    else -> return
-                }
-                onSignal(signal)
+                val payload = message.obj("payload") ?: return
+                if (payload.string("event") != "signal") return
+                val signal = payload.obj("payload") ?: return
+                onSignal(signal.toString())
             }
+            "phx_error", "phx_close" -> if (!closedByUs) onClosed("The channel disconnected.")
         }
     }
 
-    private fun sendRaw(text: String) {
+    private fun readPresence(source: JsonObject?, into: MutableMap<String, String>) {
+        if (source == null) return
+        for ((key, value) in source) {
+            val entry = value as? JsonObject ?: continue
+            val metas = entry["metas"] as? JsonArray
+            val meta = metas?.firstOrNull() as? JsonObject
+            into[key] = meta?.string("name") ?: "Phone"
+        }
+    }
+
+    private fun sendRaw(text: String, reportError: Boolean = true) {
         val message = NSURLSessionWebSocketMessage(text)
         task?.sendMessage(message) { error ->
-            if (error != null && !closedByUs) onClosed(error.localizedDescription)
+            if (error != null && reportError && !closedByUs) onClosed(error.localizedDescription)
         }
     }
 

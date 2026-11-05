@@ -21,6 +21,12 @@ data class RiderMapState(
 interface RiderMap {
     val available: Boolean
 
+    /**
+     * Android can download the streets for a ride with no internet.
+     * iPhone uses Apple Maps, which does not offer that download.
+     */
+    val savesOffline: Boolean get() = true
+
     val state: State<RiderMapState>
 
     @Composable
