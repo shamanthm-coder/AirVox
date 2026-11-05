@@ -56,6 +56,9 @@ interface IntercomSession {
 
     fun join(roomCode: String, path: ChannelPath = ChannelPath.Hotspot, password: String = "")
 
+    /** The signed-in rider's name. Channels and the map use this instead of the phone name. */
+    fun setRiderName(name: String) = Unit
+
     fun leave()
 
     fun setTalking(talking: Boolean)

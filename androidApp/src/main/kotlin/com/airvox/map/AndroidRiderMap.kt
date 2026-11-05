@@ -1,12 +1,12 @@
 package com.airvox.map
 
 import androidx.activity.ComponentActivity
+import android.view.ViewGroup
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.graphics.toColorInt
@@ -55,6 +55,8 @@ class AndroidRiderMap(
     override val state: State<RiderMapState> = stateHolder
 
     private val offlineManager: OfflineManager
+    private var mapView: MapView? = null
+    private var mapCreated = false
     private var map: MapLibreMap? = null
     private var riders: List<ChannelPlace> = emptyList()
     private var saving: OfflineRegion? = null
@@ -67,21 +69,28 @@ class AndroidRiderMap(
         offlineManager = OfflineManager.getInstance(activity)
         offlineManager.setOfflineMapboxTileCountLimit(TILE_LIMIT)
         countSavedAreas()
+        activity.lifecycle.addObserver(LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_DESTROY) {
+                mapView?.onDestroy()
+                mapView = null
+                map = null
+                mapCreated = false
+            }
+        })
     }
 
     @Composable
     override fun Show(self: ChannelPlace?, others: List<ChannelPlace>, modifier: Modifier) {
-        val mapView = remember { createMapView() }
-        DisposableEffect(mapView) {
-            publish(stateHolder.value.copy(following = true))
+        val view = mapView ?: createMapView().also { mapView = it }
+        DisposableEffect(view) {
             val lifecycle = activity.lifecycle
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
-                    Lifecycle.Event.ON_START -> mapView.onStart()
-                    Lifecycle.Event.ON_RESUME -> mapView.onResume()
-                    Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                    Lifecycle.Event.ON_STOP -> mapView.onStop()
+                    Lifecycle.Event.ON_CREATE -> ensureCreated(view)
+                    Lifecycle.Event.ON_START -> view.onStart()
+                    Lifecycle.Event.ON_RESUME -> view.onResume()
+                    Lifecycle.Event.ON_PAUSE -> view.onPause()
+                    Lifecycle.Event.ON_STOP -> view.onStop()
                     else -> Unit
                 }
             }
@@ -89,14 +98,21 @@ class AndroidRiderMap(
             lifecycle.addObserver(observer)
             onDispose {
                 lifecycle.removeObserver(observer)
+                // Leaving the Map tab pauses the map. Destroying it would drop the
+                // camera and the pins the next time the tab opens.
+                if (lifecycle.currentState == Lifecycle.State.DESTROYED) return@onDispose
                 val current = lifecycle.currentState
-                if (current.isAtLeast(Lifecycle.State.RESUMED)) mapView.onPause()
-                if (current.isAtLeast(Lifecycle.State.STARTED)) mapView.onStop()
-                mapView.onDestroy()
-                map = null
+                if (current.isAtLeast(Lifecycle.State.RESUMED)) view.onPause()
+                if (current.isAtLeast(Lifecycle.State.STARTED)) view.onStop()
             }
         }
-        AndroidView(factory = { mapView }, modifier = modifier)
+        AndroidView(
+            factory = {
+                (view.parent as? ViewGroup)?.removeView(view)
+                view
+            },
+            modifier = modifier,
+        )
         LaunchedEffect(self, others) {
             showRiders(listOfNotNull(self) + others)
         }
@@ -175,6 +191,12 @@ class AndroidRiderMap(
                 publish(stateHolder.value.copy(detail = "Could not delete saved maps. $error"))
             }
         })
+    }
+
+    private fun ensureCreated(view: MapView) {
+        if (mapCreated) return
+        view.onCreate(null)
+        mapCreated = true
     }
 
     private fun createMapView(): MapView {

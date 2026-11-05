@@ -73,6 +73,7 @@ fun AirvoxApp(
 ) {
     val signedInId = auth.state.value.account?.id
     var destination by remember(signedInId) { mutableStateOf(Destination.Channel) }
+    val channelForm = remember(signedInId) { ChannelFormState() }
     var plans by remember { mutableStateOf<List<CreditPlan>>(emptyList()) }
     val snackbarHostState = remember { SnackbarHostState() }
     var locationAnswered by remember { mutableStateOf(false) }
@@ -161,6 +162,9 @@ fun AirvoxApp(
     // Tells the Airvox API this rider is online, so the admin portal can count them.
     val riderId = authState.account?.id
     val riderName = authState.account?.displayName?.trim().orEmpty()
+    LaunchedEffect(riderName) {
+        session.setRiderName(riderName)
+    }
     LaunchedEffect(riderId, riderName) {
         if (riderName.isBlank()) {
             voxy.stop()
@@ -265,11 +269,13 @@ fun AirvoxApp(
                     bluetoothScanner = bluetoothScanner,
                     credits = wallet.state.value.credits,
                     onOpenPlans = { destination = Destination.Plans },
+                    form = channelForm,
                 )
                 Destination.Map -> MapScreen(
                     session = session,
                     reporter = places,
                     map = map,
+                    riderName = riderName,
                 )
                 Destination.Plans -> PlansScreen(
                     account = auth.state.value.account,

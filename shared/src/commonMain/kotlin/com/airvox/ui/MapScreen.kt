@@ -1,6 +1,7 @@
 package com.airvox.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,16 +53,34 @@ fun MapScreen(
     session: IntercomSession,
     reporter: PlaceReporter,
     map: RiderMap,
+    riderName: String = "",
 ) {
     val intercom = session.state.value
     val reading = reporter.reading.value
     val mapState = map.state.value
     // The channel list is preferred. The GPS reading covers this phone before a channel echoes it back.
-    val self = intercom.places.firstOrNull { it.self } ?: reading.selfPlace()
+    val self = intercom.places.firstOrNull { it.self } ?: reading.selfPlace(riderName)
     val others = intercom.places.filter { !it.self }
     val places = listOfNotNull(self) + others
     val onChannel = intercom.connection == IntercomConnection.Connecting ||
         intercom.connection == IntercomConnection.Connected
+    var expanded by remember { mutableStateOf(false) }
+
+    if (expanded && map.available) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            map.Show(self = self, others = others, modifier = Modifier.fillMaxSize())
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                MapButton(text = "Recenter", onClick = map::recenter)
+                MapButton(text = "Small screen", onClick = { expanded = false })
+            }
+        }
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -89,10 +112,10 @@ fun MapScreen(
                         .height(340.dp)
                         .clip(RoundedCornerShape(14.dp)),
                 )
-                if (!mapState.following && places.isNotEmpty()) {
-                    Spacer(Modifier.height(12.dp))
-                    MapButton(text = "Follow riders", onClick = map::recenter)
-                }
+                Spacer(Modifier.height(12.dp))
+                MapButton(text = "Recenter", onClick = map::recenter)
+                Spacer(Modifier.height(10.dp))
+                MapButton(text = "Full screen", onClick = { expanded = true })
             } else {
                 PlaceMap(self = self, others = others)
             }
@@ -271,10 +294,11 @@ private fun PlaceRow(place: ChannelPlace, self: ChannelPlace?) {
     }
 }
 
-private fun PlaceReading.selfPlace(): ChannelPlace? {
+private fun PlaceReading.selfPlace(riderName: String): ChannelPlace? {
     val lat = latitude ?: return null
     val lng = longitude ?: return null
-    return ChannelPlace(id = "self", name = "You", latitude = lat, longitude = lng, self = true)
+    val label = riderName.trim().ifBlank { "You" }
+    return ChannelPlace(id = "self", name = label, latitude = lat, longitude = lng, self = true)
 }
 
 private fun ringMeters(self: ChannelPlace?, others: List<ChannelPlace>): Double {

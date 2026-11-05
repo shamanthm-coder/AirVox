@@ -21,11 +21,11 @@ fun MainViewController(voice: IosVoiceCall) = ComposeUIViewController(
         onFocusBehavior = OnFocusBehavior.DoNothing
     },
 ) {
-    val places = remember { IosPlaceReporter() }
-    val map = remember { IosRiderMap() }
     val auth = remember { IosAuthClient(IosConfig.FIREBASE_API_KEY, IosConfig.AIRVOX_API_URL) }
     val wallet = remember { CreditWallet() }
     val session = remember { IosIntercomSession(voice) }
+    val places = remember { IosPlaceReporter(session) }
+    val map = remember { IosRiderMap() }
     val vox = remember { IosVox(session) }
     App(
         session = session,

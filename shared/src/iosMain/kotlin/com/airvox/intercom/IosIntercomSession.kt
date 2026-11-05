@@ -4,6 +4,8 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import com.airvox.IosConfig
 import kotlin.random.Random
+import kotlin.time.TimeSource
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.cinterop.BetaInteropApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.serialization.json.Json
@@ -13,6 +15,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
@@ -57,7 +60,7 @@ class IosIntercomSession(
     private val stateHolder = mutableStateOf(IntercomState())
     override val state: State<IntercomState> = stateHolder
 
-    private val selfName = UIDevice.currentDevice.name.ifBlank { "iPhone" }
+    private var selfName = UIDevice.currentDevice.name.ifBlank { "iPhone" }
     private val selfId = NSUUID().UUIDString.lowercase()
     private val peerId = MCPeerID(displayName = "$selfName ${Random.nextInt(100, 999)}")
     private val json = Json { ignoreUnknownKeys = true }
@@ -72,14 +75,22 @@ class IosIntercomSession(
     private val meshRoster = linkedMapOf<String, String>()
     private val meshNames = linkedMapOf<String, String>()
     private val peers = linkedMapOf<String, VoicePeer>()
+    private val earlyIce = linkedMapOf<String, MutableList<JsonObject>>()
+    private val earlyTalk = linkedMapOf<String, Boolean>()
+    private val peerPlaces = linkedMapOf<String, ChannelPlace>()
+    private var lastLat: Double? = null
+    private var lastLng: Double? = null
+    private var lastPlaceSent = TimeSource.Monotonic.markNow() - 10.seconds
     private var advertiser: MCNearbyServiceAdvertiser? = null
     private var browser: MCNearbyServiceBrowser? = null
     private var mesh: MCSession? = null
     private var realtime: IosRealtime? = null
+    private var lan: IosLanChannel? = null
     private var pendingRoom: String? = null
     private var pendingSecret: String? = null
     private var pendingPath = ChannelPath.Hotspot
     private var currentKey: String? = null
+    private var talkPulse = 0
 
     init {
         voice.attach(VoiceListener())
@@ -174,6 +185,23 @@ class IosIntercomSession(
         }
     }
 
+    override fun setRiderName(name: String) {
+        val trimmed = name.trim().take(40)
+        if (trimmed.isBlank() || trimmed == selfName) return
+        selfName = trimmed
+        lan?.rename(trimmed)
+        realtime?.rename(trimmed)
+        if (path != ChannelPath.Internet && mesh != null) {
+            sendSignal(buildJsonObject {
+                put("kind", "hello")
+                put("name", selfName)
+            })
+        }
+        lastPlaceSent = TimeSource.Monotonic.markNow() - 10.seconds
+        broadcastPlace(force = true)
+        publish()
+    }
+
     override fun join(roomCode: String, path: ChannelPath, password: String) {
         val normalized = roomCode.trim().lowercase().filter { it.isLetterOrDigit() }.take(16)
         val secret = password.trim().take(32)
@@ -232,6 +260,7 @@ class IosIntercomSession(
             put("kind", "talk")
             put("talking", talking)
         })
+        if (talking) startTalkPulse() else stopTalkPulse()
         publish()
     }
 
@@ -260,12 +289,40 @@ class IosIntercomSession(
         currentKey = key
         if (selected == ChannelPath.Internet) {
             openInternet(key, gen)
+        } else if (selected == ChannelPath.Hotspot) {
+            channelReady = true
+            openLan(key, gen)
+            detail = waitingDetail()
+            publish()
         } else {
             channelReady = true
             openNearby(key)
             detail = waitingDetail()
             publish()
         }
+    }
+
+    private fun openLan(key: String, gen: Int) {
+        val channel = IosLanChannel(
+            onSignal = { text -> onMain { if (gen == generation) handleSignal(text) } },
+            onLost = { id ->
+                onMain {
+                    if (gen != generation) return@onMain
+                    meshRoster.remove(id)
+                    closePeer(id)
+                    refreshConnection()
+                }
+            },
+            onFailed = { reason ->
+                onMain {
+                    if (gen != generation) return@onMain
+                    detail = reason
+                    publish()
+                }
+            },
+        )
+        lan = channel
+        channel.start(key, selfId, selfName)
     }
 
     private fun openNearby(key: String) {
@@ -351,7 +408,13 @@ class IosIntercomSession(
                 voice.acceptAnswer(from, sdp)
             }
             "ice" -> {
-                if (peers[from] == null) return
+                if (peers[from] == null) {
+                    earlyIce.getOrPut(from) { mutableListOf() }.let { bucket ->
+                        if (bucket.size >= 40) bucket.removeAt(0)
+                        bucket.add(message)
+                    }
+                    return
+                }
                 voice.addIce(
                     peerId = from,
                     sdpMid = message.string("sdpMid").orEmpty(),
@@ -360,17 +423,62 @@ class IosIntercomSession(
                 )
             }
             "talk" -> {
-                val link = peers[from] ?: return
-                link.talking = message.bool("talking")
-                voice.setRemoteTalking(from, link.talking)
+                val talking = message.bool("talking")
+                val link = peers[from]
+                if (link == null) {
+                    earlyTalk[from] = talking
+                    return
+                }
+                link.talking = talking
+                voice.setRemoteTalking(from, talking)
                 publish()
             }
             "bye" -> {
                 closePeer(from)
+                earlyIce.remove(from)
+                earlyTalk.remove(from)
+                peerPlaces.remove(from)
                 if (path == ChannelPath.Internet) presence.remove(from) else meshRoster.remove(from)
                 refreshConnection()
             }
+            "place" -> rememberPlace(from, message)
         }
+    }
+
+    fun sharePlace(latitude: Double, longitude: Double) {
+        if (latitude !in -90.0..90.0 || longitude !in -180.0..180.0) return
+        lastLat = latitude
+        lastLng = longitude
+        publish()
+        broadcastPlace(force = false)
+    }
+
+    private fun rememberPlace(from: String, message: JsonObject) {
+        val lat = message.dbl("lat") ?: return
+        val lng = message.dbl("lng") ?: return
+        if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return
+        peerPlaces[from] = ChannelPlace(
+            id = from,
+            name = message.string("name") ?: roster()[from] ?: "Phone",
+            latitude = lat,
+            longitude = lng,
+        )
+        publish()
+    }
+
+    private fun broadcastPlace(force: Boolean) {
+        val lat = lastLat ?: return
+        val lng = lastLng ?: return
+        if (connection != IntercomConnection.Connecting && connection != IntercomConnection.Connected) return
+        val wait = if (force) 1.seconds else 4.seconds
+        if (lastPlaceSent.elapsedNow() < wait) return
+        lastPlaceSent = TimeSource.Monotonic.markNow()
+        sendSignal(buildJsonObject {
+            put("kind", "place")
+            put("name", selfName)
+            put("lat", lat)
+            put("lng", lng)
+        })
     }
 
     private fun syncPeers() {
@@ -382,6 +490,10 @@ class IosIntercomSession(
                 link.offerSent = true
                 voice.createOffer(other)
             }
+        }
+        if (others.isNotEmpty()) {
+            peerPlaces.keys.retainAll(others.keys)
+            broadcastPlace(force = true)
         }
         refreshConnection()
     }
@@ -414,18 +526,61 @@ class IosIntercomSession(
             ChannelPath.Internet -> "Internet channel is open. Tap Talk to speak."
         }
         publish()
+        if (localTalking) {
+            sendSignal(buildJsonObject {
+                put("kind", "talk")
+                put("talking", true)
+            })
+        }
     }
 
     private fun openPeer(id: String): VoicePeer {
         val created = VoicePeer()
         peers[id] = created
         voice.openPeer(id)
+        flushEarly(id)
         return created
     }
 
     private fun closePeer(id: String) {
         if (peers.remove(id) == null) return
         voice.closePeer(id)
+    }
+
+    private fun flushEarly(id: String) {
+        earlyTalk.remove(id)?.let { talking ->
+            peers[id]?.talking = talking
+            voice.setRemoteTalking(id, talking)
+        }
+        val waiting = earlyIce.remove(id).orEmpty()
+        waiting.forEach { message ->
+            voice.addIce(
+                peerId = id,
+                sdpMid = message.string("sdpMid").orEmpty(),
+                sdpMLineIndex = message.int("sdpMLineIndex"),
+                candidate = message.string("candidate").orEmpty(),
+            )
+        }
+    }
+
+    private fun startTalkPulse() {
+        val ticket = ++talkPulse
+        scheduleTalkPulse(ticket)
+    }
+
+    private fun stopTalkPulse() {
+        talkPulse += 1
+    }
+
+    private fun scheduleTalkPulse(ticket: Int) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2_000_000_000), dispatch_get_main_queue()) {
+            if (ticket != talkPulse || !localTalking) return@dispatch_after
+            sendSignal(buildJsonObject {
+                put("kind", "talk")
+                put("talking", true)
+            })
+            scheduleTalkPulse(ticket)
+        }
     }
 
     private fun sendSignal(fields: JsonObject, to: String? = null) {
@@ -436,6 +591,8 @@ class IosIntercomSession(
         }
         if (path == ChannelPath.Internet) {
             realtime?.send(signal)
+        } else if (path == ChannelPath.Hotspot) {
+            lan?.send(signal.toString())
         } else {
             sendMesh(signal.toString())
         }
@@ -457,13 +614,13 @@ class IosIntercomSession(
 
     private fun joiningDetail(room: String): String = when (path) {
         ChannelPath.Bluetooth -> "Looking over Bluetooth for $room…"
-        ChannelPath.Hotspot -> "Opening a hotspot for $room…"
+        ChannelPath.Hotspot -> "Looking for other phones on this hotspot…"
         ChannelPath.Internet -> "Joining $room over the internet…"
     }
 
     private fun waitingDetail(): String = when (path) {
         ChannelPath.Bluetooth -> "Bluetooth is on. Waiting for other phones with this room code."
-        ChannelPath.Hotspot -> "Hotspot is open. Waiting for other phones with this room code."
+        ChannelPath.Hotspot -> "Hotspot is open. Waiting for the other phone on this same Wi-Fi. Allow Local Network if iPhone asks."
         ChannelPath.Internet -> "Waiting for other phones on this internet channel."
     }
 
@@ -474,11 +631,17 @@ class IosIntercomSession(
         browser = null
         mesh?.disconnect()
         mesh = null
+        lan?.close()
+        lan = null
         realtime?.close()
         realtime = null
         currentKey = null
         channelReady = false
         peers.clear()
+        peerPlaces.clear()
+        earlyIce.clear()
+        earlyTalk.clear()
+        stopTalkPulse()
         voice.stop()
     }
 
@@ -490,8 +653,24 @@ class IosIntercomSession(
             members = memberList(),
             localTalking = localTalking,
             remoteTalking = peers.values.any { it.talking },
+            places = placeList(),
             detail = detail,
         )
+    }
+
+    private fun placeList(): List<ChannelPlace> {
+        val self = lastLat?.let { lat ->
+            lastLng?.let { lng ->
+                ChannelPlace(id = selfId, name = selfName, latitude = lat, longitude = lng, self = true)
+            }
+        }
+        if (connection == IntercomConnection.Disconnected) return listOfNotNull(self)
+        val known = roster().keys
+        val others = peerPlaces
+            .filter { (id, _) -> id != selfId && (known.isEmpty() || id in known) }
+            .values
+            .toList()
+        return listOfNotNull(self) + others
     }
 
     private fun memberList(): List<IntercomMember> {
@@ -610,6 +789,9 @@ private fun JsonObject.int(key: String): Int = (this[key] as? JsonPrimitive)?.in
 
 private fun JsonObject.bool(key: String): Boolean = (this[key] as? JsonPrimitive)?.booleanOrNull ?: false
 
+private fun JsonObject.dbl(key: String): Double? = (this[key] as? JsonPrimitive)?.doubleOrNull
+    ?: (this[key] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
+
 private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 
 /** Supabase Realtime room. Same topic and signal envelope Android uses. Voice stays on WebRTC. */
@@ -629,10 +811,12 @@ private class IosRealtime(
     private var ref = 2
     private var closedByUs = false
     private var heartbeats = 0
+    private var trackedName = ""
     private val members = linkedMapOf<String, String>()
 
     fun connect(roomKey: String, peerId: String, displayName: String) {
         closedByUs = false
+        trackedName = displayName
         members.clear()
         topic = "realtime:airvox:$roomKey"
         val host = supabaseUrl.trim().removePrefix("https://").removePrefix("http://").trimEnd('/')
@@ -661,7 +845,29 @@ private class IosRealtime(
             put("join_ref", joinRef)
         }.toString())
         scheduleHeartbeat()
-        listen(displayName)
+        listen()
+    }
+
+    fun rename(name: String) {
+        val next = name.trim().take(40)
+        if (next.isBlank() || next == trackedName || task == null) return
+        trackedName = next
+        sendPresence()
+    }
+
+    private fun sendPresence() {
+        if (trackedName.isBlank()) return
+        sendRaw(buildJsonObject {
+            put("topic", topic)
+            put("event", "presence")
+            put("payload", buildJsonObject {
+                put("type", "presence")
+                put("event", "track")
+                put("payload", buildJsonObject { put("name", trackedName) })
+            })
+            put("ref", nextRef())
+            put("join_ref", joinRef)
+        }.toString())
     }
 
     fun send(signal: JsonObject) {
@@ -699,7 +905,7 @@ private class IosRealtime(
         }
     }
 
-    private fun listen(displayName: String) {
+    private fun listen() {
         val socket = task ?: return
         socket.receiveMessageWithCompletionHandler { message, error ->
             if (closedByUs) return@receiveMessageWithCompletionHandler
@@ -708,12 +914,12 @@ private class IosRealtime(
                 return@receiveMessageWithCompletionHandler
             }
             val text = message?.string
-            if (text != null) handle(text, displayName)
-            listen(displayName)
+            if (text != null) handle(text)
+            listen()
         }
     }
 
-    private fun handle(text: String, displayName: String) {
+    private fun handle(text: String) {
         val message = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         val eventTopic = message.string("topic").orEmpty()
         if (eventTopic.isNotEmpty() && eventTopic != topic && eventTopic != "phoenix") return
@@ -722,17 +928,7 @@ private class IosRealtime(
                 if (message.string("ref") != joinRef) return
                 val payload = message.obj("payload")
                 if (payload?.string("status") == "ok") {
-                    sendRaw(buildJsonObject {
-                        put("topic", topic)
-                        put("event", "presence")
-                        put("payload", buildJsonObject {
-                            put("type", "presence")
-                            put("event", "track")
-                            put("payload", buildJsonObject { put("name", displayName) })
-                        })
-                        put("ref", nextRef())
-                        put("join_ref", joinRef)
-                    }.toString())
+                    sendPresence()
                     onJoined()
                 } else {
                     val response = payload?.obj("response")

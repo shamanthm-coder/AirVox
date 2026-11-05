@@ -71,6 +71,13 @@ import com.airvox.voxy.VoxyState
 import com.airvox.theme.AirvoxPalette
 import org.jetbrains.compose.resources.painterResource
 
+/** Room code, password, and path. Kept by the app so a tab change does not clear them. */
+class ChannelFormState {
+    val roomCode = mutableStateOf("")
+    val password = mutableStateOf("")
+    val path = mutableStateOf(ChannelPath.Hotspot)
+}
+
 @Composable
 fun ChannelScreen(
     session: IntercomSession,
@@ -80,14 +87,15 @@ fun ChannelScreen(
     bluetoothScanner: BluetoothEarphoneScanner,
     credits: Int,
     onOpenPlans: () -> Unit,
+    form: ChannelFormState,
 ) {
     val intercom by session.state
     val voxState by vox.state
     val voxyState by voxy.state
     val audio = bluetoothScanner.scanResult.value
-    var roomCode by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var selectedPath by remember { mutableStateOf(ChannelPath.Hotspot) }
+    var roomCode by form.roomCode
+    var password by form.password
+    var selectedPath by form.path
     var creditNote by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         bluetoothScanner.refreshAudioOutput()
@@ -729,7 +737,7 @@ private fun pathBlurb(path: ChannelPath, activeAudioOutput: Earphone?): String {
         ChannelPath.Bluetooth ->
             "Voice goes over Bluetooth. Stay close, with Bluetooth on, and use the same room code and password."
         ChannelPath.Hotspot ->
-            "Voice goes over a Wi-Fi hotspot between phones. No internet needed. Use the same room code and password."
+            "Voice goes over the Wi-Fi hotspot. No internet needed. Both phones join that same hotspot, with the same room code and password."
         ChannelPath.Internet ->
             "Voice goes over the internet. Each phone needs data or Wi-Fi, plus the same room code and password."
     }

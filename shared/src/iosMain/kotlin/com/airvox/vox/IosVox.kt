@@ -80,6 +80,8 @@ class IosVox(
         sync()
     }
 
+    override fun setEarPaused(paused: Boolean) = Unit
+
     override fun dispose() {
         enabled = false
         connectJob?.cancel()

@@ -13,6 +13,8 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
     private var internet = false
     private var micEnabled = false
     private var epoch = 0
+    private var routeWatching = false
+    private var applyingRoute = false
 
     func attach(listener: IosVoiceListener) {
         self.listener = listener
@@ -36,6 +38,8 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
                 link.connection.delegate = nil
                 link.connection.close()
             }
+            NotificationCenter.default.removeObserver(self)
+            self.routeWatching = false
             self.deactivateAudio()
         }
     }
@@ -163,6 +167,7 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
     func setMicEnabled(enabled: Bool) {
         onMain {
             self.micEnabled = enabled
+            if enabled { self.applyOutputRoute() }
             for link in self.links.values {
                 link.localTrack.isEnabled = enabled
             }
@@ -174,6 +179,7 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
             guard let link = self.links[peerId] else { return }
             link.remoteTalking = talking
             link.remoteTrack?.isEnabled = talking
+            if talking { self.applyOutputRoute() }
         }
     }
 
@@ -193,6 +199,7 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
         guard links[peerId]?.epoch == epoch else { return }
         switch state {
         case .connected, .completed:
+            applyOutputRoute()
             emit { $0.onConnected(peerId: peerId) }
         case .failed:
             emit { $0.onUnreachable(peerId: peerId) }
@@ -205,6 +212,7 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
         guard links[peerId]?.epoch == epoch else { return }
         switch state {
         case .connected:
+            applyOutputRoute()
             emit { $0.onConnected(peerId: peerId) }
         case .failed:
             emit { $0.onDropped(peerId: peerId) }
@@ -251,7 +259,9 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
     private func iceServers() -> [RTCIceServer] {
         let stun = { (host: String) in RTCIceServer(urlStrings: ["stun:\(host):19302"]) }
         if !internet {
-            return [stun("stun.l.google.com")]
+            // Hotspot and Bluetooth stay on the local Wi-Fi. A STUN server needs
+            // internet and would leave the call waiting when there is none.
+            return []
         }
         return [
             stun("stun.l.google.com"),
@@ -296,16 +306,88 @@ final class AirvoxWebRtc: NSObject, IosVoiceCall {
 
     private func configureAudio() {
         let session = RTCAudioSession.sharedInstance()
+        session.useManualAudio = true
+        session.isAudioEnabled = true
+        watchRoute()
+        applyOutputRoute()
+    }
+
+    /// Bluetooth headset or speaker when one is connected. Otherwise the loudspeaker,
+    /// the same one music uses, not the earpiece a phone call uses.
+    private func applyOutputRoute() {
+        if applyingRoute { return }
+        applyingRoute = true
+        defer { applyingRoute = false }
+        let options = routeOptions()
+        let preferred = RTCAudioSessionConfiguration.webRTC()
+        preferred.category = AVAudioSession.Category.playAndRecord.rawValue
+        preferred.categoryOptions = options
+        preferred.mode = AVAudioSession.Mode.default.rawValue
+        RTCAudioSessionConfiguration.setWebRTC(preferred)
+
+        let session = RTCAudioSession.sharedInstance()
         session.lockForConfiguration()
         defer { session.unlockForConfiguration() }
         do {
-            try session.setCategory(.playAndRecord, with: [.defaultToSpeaker, .allowBluetoothHFP])
-            try session.setMode(.voiceChat)
-            try session.overrideOutputAudioPort(.speaker)
+            try session.setCategory(.playAndRecord, mode: .default, options: options)
+            if let headset = bluetoothInput() {
+                try session.setPreferredInput(headset)
+                try session.overrideOutputAudioPort(.none)
+            } else if externalOutput() {
+                try session.overrideOutputAudioPort(.none)
+            } else {
+                try AVAudioSession.sharedInstance().setPreferredInput(nil)
+                try session.overrideOutputAudioPort(.speaker)
+            }
             try session.setActive(true)
+            session.isAudioEnabled = true
         } catch {
-            fail("Could not start the microphone.")
+            // A later route change applies the speaker or the headset again.
         }
+    }
+
+    private func routeOptions() -> AVAudioSession.CategoryOptions {
+        var options: AVAudioSession.CategoryOptions = [.allowBluetoothHFP, .allowBluetoothA2DP]
+        if !externalOutput() && bluetoothInput() == nil {
+            options.insert(.defaultToSpeaker)
+        }
+        return options
+    }
+
+    private func bluetoothInput() -> AVAudioSessionPortDescription? {
+        let inputs = AVAudioSession.sharedInstance().availableInputs ?? []
+        return inputs.first { port in
+            port.portType == .bluetoothHFP || port.portType == .bluetoothLE
+        }
+    }
+
+    private func externalOutput() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { port in
+            switch port.portType {
+            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones, .airPlay, .carAudio:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private func watchRoute() {
+        if routeWatching { return }
+        routeWatching = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(audioRouteChanged(_:)),
+            name: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance()
+        )
+    }
+
+    @objc private func audioRouteChanged(_ notification: Notification) {
+        let raw = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason = raw.flatMap { AVAudioSession.RouteChangeReason(rawValue: $0) }
+        if reason == .override || reason == .categoryChange { return }
+        DispatchQueue.main.async { self.applyOutputRoute() }
     }
 
     private func deactivateAudio() {

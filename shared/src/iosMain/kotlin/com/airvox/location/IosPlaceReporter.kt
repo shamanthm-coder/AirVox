@@ -2,6 +2,7 @@ package com.airvox.location
 
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
+import com.airvox.intercom.IosIntercomSession
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
 import platform.CoreLocation.CLLocation
@@ -21,7 +22,9 @@ import platform.darwin.NSObject
  * GPS fixes from CoreLocation. GPS does not need mobile data or Wi-Fi.
  */
 @OptIn(ExperimentalForeignApi::class)
-class IosPlaceReporter : PlaceReporter {
+class IosPlaceReporter(
+    private val session: IosIntercomSession,
+) : PlaceReporter {
     private val readingHolder = mutableStateOf(PlaceReading())
     override val reading: State<PlaceReading> = readingHolder
 
@@ -42,6 +45,9 @@ class IosPlaceReporter : PlaceReporter {
                 this@IosPlaceReporter.latitude = latitude
                 this@IosPlaceReporter.longitude = longitude
             }
+            val lat = latitude
+            val lng = longitude
+            if (lat != null && lng != null) session.sharePlace(lat, lng)
             publish(allowed = true, gpsOn = true, detail = "GPS is on. No internet needed.")
         }
 

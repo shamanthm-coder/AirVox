@@ -102,6 +102,22 @@ class NearbyChannel(
         return builder.build()
     }
 
+    fun rename(name: String) {
+        val next = name.trim()
+        if (next.isBlank() || closed || next == selfName) return
+        selfName = next
+        connected.values.forEach { peer ->
+            send(
+                JSONObject()
+                    .put("kind", "hello")
+                    .put("from", selfId)
+                    .put("to", peer.id)
+                    .put("name", selfName),
+            )
+        }
+        publishPresence()
+    }
+
     fun send(body: JSONObject) {
         val bytes = Payload.fromBytes(body.toString().toByteArray(Charsets.UTF_8))
         val to = body.optString("to")

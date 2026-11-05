@@ -46,10 +46,11 @@ class AndroidIntercomSession(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioManager = activity.getSystemService(AudioManager::class.java)
     private val selfId = UUID.randomUUID().toString()
-    private val selfName = Build.MODEL.ifBlank { "Phone" }
+    private var selfName = Build.MODEL.ifBlank { "Phone" }
 
     private var generation = 0
     private var nearby: NearbyChannel? = null
+    private var lan: LanChannel? = null
     private var internet: SupabaseRealtime? = null
     private var path = ChannelPath.Hotspot
     private val remoteTalkers = LinkedHashSet<String>()
@@ -74,6 +75,7 @@ class AndroidIntercomSession(
     private var audioModule: JavaAudioDeviceModule? = null
     private var localSource: AudioSource? = null
     private val peers = LinkedHashMap<String, VoiceLink>()
+    private val earlySignals = LinkedHashMap<String, MutableList<JSONObject>>()
     private var roomCode: String = ""
     private var connection = IntercomConnection.Disconnected
     private var detail: String? = null
@@ -115,6 +117,18 @@ class AndroidIntercomSession(
                 setLocalTracksEnabled(true)
             }
         }
+    }
+
+    override fun setRiderName(name: String) {
+        val trimmed = name.trim().take(40)
+        if (trimmed.isBlank() || trimmed == selfName) return
+        selfName = trimmed
+        lan?.rename(trimmed)
+        nearby?.rename(trimmed)
+        internet?.rename(trimmed)
+        lastSentAt = 0L
+        broadcastPlace(force = true)
+        publish()
     }
 
     override fun join(roomCode: String, path: ChannelPath, password: String) {
@@ -178,7 +192,10 @@ class AndroidIntercomSession(
             refreshVoice()
             sendSignal(JSONObject().put("kind", "talk").put("talking", true))
             setLocalTracksEnabled(true)
+            mainHandler.removeCallbacks(talkPulse)
+            mainHandler.postDelayed(talkPulse, 2_000)
         } else {
+            mainHandler.removeCallbacks(talkPulse)
             setLocalTracksEnabled(false)
             sendSignal(JSONObject().put("kind", "talk").put("talking", false))
             refreshVoice()
@@ -222,7 +239,24 @@ class AndroidIntercomSession(
     }
 
     private fun connectNearby(gen: Int, normalized: String) {
-        if (path == ChannelPath.Hotspot) ensureFactory()
+        if (path == ChannelPath.Hotspot) {
+            ensureFactory()
+            val channel = LanChannel(
+                context = activity,
+                listener = object : LanChannel.Listener {
+                    override fun onJoined() = signalJoined(gen)
+
+                    override fun onPresence(members: Map<String, String>) = signalPresence(gen, members)
+
+                    override fun onSignal(message: JSONObject) = signalMessage(gen, message)
+
+                    override fun onClosed(reason: String) = signalClosed(gen, reason)
+                },
+            )
+            lan = channel
+            channel.connect(normalized, selfId, selfName)
+            return
+        }
         nearby = NearbyChannel(
             activity = activity,
             bluetoothOnly = path == ChannelPath.Bluetooth,
@@ -344,13 +378,13 @@ class AndroidIntercomSession(
 
     private fun joiningDetail(room: String): String = when (path) {
         ChannelPath.Bluetooth -> "Looking over Bluetooth for $room…"
-        ChannelPath.Hotspot -> "Opening a hotspot for $room…"
+        ChannelPath.Hotspot -> "Looking for other phones on this hotspot…"
         ChannelPath.Internet -> "Joining $room over the internet…"
     }
 
     private fun waitingDetail(): String = when (path) {
         ChannelPath.Bluetooth -> "Bluetooth is on. Waiting for other phones with this room code."
-        ChannelPath.Hotspot -> "Hotspot is open. Waiting for other phones with this room code."
+        ChannelPath.Hotspot -> "Hotspot is open. Waiting for the other phone on this same Wi-Fi."
         ChannelPath.Internet -> "Waiting for other phones on this internet channel."
     }
 
@@ -408,7 +442,11 @@ class AndroidIntercomSession(
             }
             "ice" -> {
                 if (path == ChannelPath.Bluetooth) return
-                val link = peers[from] ?: return
+                val link = peers[from]
+                if (link == null) {
+                    rememberEarly(from, message)
+                    return
+                }
                 val candidate = IceCandidate(
                     message.optString("sdpMid"),
                     message.optInt("sdpMLineIndex"),
@@ -424,12 +462,18 @@ class AndroidIntercomSession(
                 if (path == ChannelPath.Bluetooth) {
                     noteRemoteTalk(from, message.optBoolean("talking"))
                 } else {
+                    val link = peers[from]
+                    if (link == null) {
+                        rememberEarly(from, message)
+                        return
+                    }
                     onRemoteTalk(from, message.optBoolean("talking"))
                 }
             }
             "hello" -> Unit
             "place" -> rememberPlace(from, message)
             "bye" -> {
+                earlySignals.remove(from)
                 closePeer(from)
                 if (peers.isEmpty() && channelReady) {
                     connection = IntercomConnection.Connecting
@@ -479,7 +523,11 @@ class AndroidIntercomSession(
         } else if (!body.has("to")) {
             body.put("to", "")
         }
-        nearby?.send(body) ?: internet?.send(body)
+        when (path) {
+            ChannelPath.Hotspot -> lan?.send(body)
+            ChannelPath.Internet -> internet?.send(body)
+            else -> nearby?.send(body)
+        }
     }
 
     private fun ensureFactory() {
@@ -532,6 +580,7 @@ class AndroidIntercomSession(
             localTrack = track,
         )
         peers[peerId] = link
+        flushEarly(peerId)
         return link
     }
 
@@ -623,6 +672,9 @@ class AndroidIntercomSession(
             ChannelPath.Internet -> "Internet channel is open. Tap Talk to speak."
         }
         publish()
+        if (localTalking && path != ChannelPath.Bluetooth) {
+            sendSignal(JSONObject().put("kind", "talk").put("talking", true))
+        }
     }
 
     private fun rtcConfig(): PeerConnection.RTCConfiguration {
@@ -638,9 +690,9 @@ class AndroidIntercomSession(
 
     private fun iceServers(): List<PeerConnection.IceServer> {
         if (path != ChannelPath.Internet) {
-            return listOf(
-                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            )
+            // The phones are on the same hotspot. Local addresses are enough,
+            // and a STUN lookup cannot work when there is no internet.
+            return emptyList()
         }
         return listOf(
             PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -710,6 +762,26 @@ class AndroidIntercomSession(
                 }
             }
         }, SessionDescription(type, sdp))
+    }
+
+    private fun rememberEarly(from: String, message: JSONObject) {
+        if (from.isBlank()) return
+        val bucket = earlySignals.getOrPut(from) { mutableListOf() }
+        if (bucket.size >= 40) bucket.removeAt(0)
+        bucket.add(JSONObject(message.toString()))
+    }
+
+    private fun flushEarly(peerId: String) {
+        val waiting = earlySignals.remove(peerId) ?: return
+        waiting.forEach { handleSignal(it) }
+    }
+
+    private val talkPulse = object : Runnable {
+        override fun run() {
+            if (!localTalking || path == ChannelPath.Bluetooth) return
+            sendSignal(JSONObject().put("kind", "talk").put("talking", true))
+            mainHandler.postDelayed(this, 2_000)
+        }
     }
 
     private fun audioConstraints(): MediaConstraints {
@@ -794,9 +866,12 @@ class AndroidIntercomSession(
         clearTalkTimeouts()
         remoteTalkers.clear()
         peerPlaces.clear()
+        earlySignals.clear()
         placeAudience = emptySet()
         nearby?.close()
         nearby = null
+        lan?.close()
+        lan = null
         internet?.close()
         internet = null
         closeAllPeers()
@@ -811,6 +886,7 @@ class AndroidIntercomSession(
             scoReceiverRegistered = false
         }
         localTalking = false
+        mainHandler.removeCallbacks(talkPulse)
         if (voiceLatched && resumeMusic) {
             voiceLatched = false
             stopVoiceRoute()
@@ -887,7 +963,7 @@ class AndroidIntercomSession(
     private fun placeList(): List<ChannelPlace> {
         val self = lastLat?.let { lat ->
             lastLng?.let { lng ->
-                ChannelPlace(id = selfId, name = "You", latitude = lat, longitude = lng, self = true)
+                ChannelPlace(id = selfId, name = selfName, latitude = lat, longitude = lng, self = true)
             }
         }
         if (connection == IntercomConnection.Disconnected) {
@@ -898,7 +974,7 @@ class AndroidIntercomSession(
             .map { (id, spot) ->
                 ChannelPlace(
                     id = id,
-                    name = presence[id] ?: spot.name,
+                    name = spot.name.ifBlank { presence[id] ?: "Phone" },
                     latitude = spot.latitude,
                     longitude = spot.longitude,
                 )

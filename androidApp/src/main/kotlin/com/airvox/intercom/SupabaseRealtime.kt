@@ -95,6 +95,13 @@ class SupabaseRealtime(
         })
     }
 
+    fun rename(name: String) {
+        val next = name.trim().take(40)
+        if (next.isBlank() || next == pendingName) return
+        pendingName = next
+        trackPresence()
+    }
+
     fun send(signal: JSONObject) {
         sendRaw(
             JSONObject()

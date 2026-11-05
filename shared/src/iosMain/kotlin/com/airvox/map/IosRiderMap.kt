@@ -3,13 +3,15 @@ package com.airvox.map
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.UIKitInteropInteractionMode
 import androidx.compose.ui.viewinterop.UIKitInteropProperties
 import androidx.compose.ui.viewinterop.UIKitView
 import com.airvox.intercom.ChannelPlace
+import kotlin.time.TimeSource
+import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.useContents
 import platform.CoreLocation.CLLocationCoordinate2DMake
 import platform.MapKit.MKAnnotationProtocol
 import platform.MapKit.MKAnnotationView
@@ -41,13 +43,12 @@ class IosRiderMap : RiderMap {
     private var riders: List<ChannelPlace> = emptyList()
     private var shownKey = ""
     private var framed = false
-    private var programmatic = false
+    private var ignoreMovesUntil = TimeSource.Monotonic.markNow()
 
     private val delegate = object : NSObject(), MKMapViewDelegateProtocol {
         override fun mapView(mapView: MKMapView, regionDidChangeAnimated: Boolean) {
-            val movedByUs = programmatic
-            programmatic = false
-            if (!movedByUs && stateHolder.value.following) {
+            if (ignoreMovesUntil.hasNotPassedNow()) return
+            if (stateHolder.value.following) {
                 publish(stateHolder.value.copy(following = false))
             }
         }
@@ -58,7 +59,11 @@ class IosRiderMap : RiderMap {
                     ?: MKMarkerAnnotationView(annotation = viewForAnnotation, reuseIdentifier = PIN)
                 marker.annotation = viewForAnnotation
                 val selfPin = viewForAnnotation.subtitle == SELF
-                marker.markerTintColor = if (selfPin) UIColor.whiteColor else UIColor.blackColor
+                marker.markerTintColor = if (selfPin) {
+                    UIColor.whiteColor
+                } else {
+                    UIColor.colorWithRed(0.29, green = 0.62, blue = 0.95, alpha = 1.0)
+                }
                 marker.glyphTintColor = if (selfPin) UIColor.blackColor else UIColor.whiteColor
                 marker.titleVisibility = MKFeatureVisibility.MKFeatureVisibilityVisible
                 marker.subtitleVisibility = MKFeatureVisibility.MKFeatureVisibilityHidden
@@ -70,14 +75,13 @@ class IosRiderMap : RiderMap {
 
     @Composable
     override fun Show(self: ChannelPlace?, others: List<ChannelPlace>, modifier: Modifier) {
-        val view = remember { createMap() }
+        // One map for the life of the screen. A new view on each tab visit starts
+        // over India and drops the pins.
+        val view = mapView ?: createMap()
         UIKitView(
             factory = { view },
             modifier = modifier,
             update = { showRiders(listOfNotNull(self) + others) },
-            onRelease = { released ->
-                if (mapView === released) mapView = null
-            },
             properties = UIKitInteropProperties(
                 interactionMode = UIKitInteropInteractionMode.NonCooperative,
             ),
@@ -86,6 +90,7 @@ class IosRiderMap : RiderMap {
 
     override fun recenter() {
         publish(stateHolder.value.copy(following = true))
+        framed = false
         mapView?.let { frame(it, animate = true) }
     }
 
@@ -111,7 +116,8 @@ class IosRiderMap : RiderMap {
         val key = places.joinToString(separator = "|") { place ->
             "${place.id}:${place.latitude}:${place.longitude}:${place.name}:${place.self}"
         }
-        if (key != shownKey) {
+        val pinsMissing = places.isNotEmpty() && view.annotations.isEmpty()
+        if (key != shownKey || pinsMissing) {
             shownKey = key
             view.removeAnnotations(view.annotations)
             places.forEach { place ->
@@ -127,7 +133,9 @@ class IosRiderMap : RiderMap {
 
     private fun frame(view: MKMapView, animate: Boolean) {
         if (riders.isEmpty()) return
-        programmatic = true
+        val wideEnough = view.bounds.useContents { size.width >= 20.0 && size.height >= 20.0 }
+        if (!wideEnough) return
+        ignoreMovesUntil = TimeSource.Monotonic.markNow() + 1500.milliseconds
         val region = if (riders.size == 1) {
             val place = riders.first()
             MKCoordinateRegionMakeWithDistance(

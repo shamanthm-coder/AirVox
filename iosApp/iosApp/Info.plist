@@ -33,6 +33,7 @@
 	<array>
 		<string>_airvox-ch._tcp</string>
 		<string>_airvox-ch._udp</string>
+		<string>_airvox-lan._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Airvox finds other phones on this Wi-Fi hotspot or Bluetooth channel.</string>
