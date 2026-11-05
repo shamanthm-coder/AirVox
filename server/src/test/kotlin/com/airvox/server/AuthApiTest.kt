@@ -32,7 +32,7 @@ class FirebaseIdTokenVerifierTest {
     private val clock = Instant.parse("2026-11-02T12:00:00Z")
     private val verifier = FirebaseIdTokenVerifier(
         projectId = "airvox-demo",
-        keys = SigningKeys { kid -> if (kid == "test") pair.public else null },
+        keys = { kid -> if (kid == "test") pair.public else null },
         clock = { clock },
     )
 
@@ -378,7 +378,7 @@ class AuthApiTest {
                 return RemovedRider(userId, "uid-1")
             }
         }
-        withApi(sync = sync, staff = StaffGate { it == "staff" }, accounts = AccountDeleter { uid ->
+        withApi(sync = sync, staff = { it == "staff" }, accounts = { uid ->
             deleted += uid
             true
         }) {

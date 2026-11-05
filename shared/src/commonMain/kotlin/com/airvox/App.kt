@@ -18,6 +18,8 @@ import com.airvox.theme.AirvoxTheme
 import com.airvox.ui.AirvoxApp
 import com.airvox.vox.UnavailableVox
 import com.airvox.vox.Vox
+import com.airvox.voxy.UnavailableVoxy
+import com.airvox.voxy.Voxy
 
 @Composable
 fun App(
@@ -25,6 +27,7 @@ fun App(
     playback: PlaybackController = UnavailablePlaybackController(),
     bluetoothScanner: BluetoothEarphoneScanner = UnavailableBluetoothEarphoneScanner(),
     vox: Vox = UnavailableVox(),
+    voxy: Voxy = UnavailableVoxy(),
     places: PlaceReporter = UnavailablePlaceReporter(),
     map: RiderMap = UnavailableRiderMap(),
     auth: AuthClient = UnavailableAuthClient(),
@@ -39,6 +42,7 @@ fun App(
             playback = playback,
             bluetoothScanner = bluetoothScanner,
             vox = vox,
+            voxy = voxy,
             places = places,
             map = map,
             auth = auth,

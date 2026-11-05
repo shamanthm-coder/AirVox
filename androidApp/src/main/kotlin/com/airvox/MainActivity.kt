@@ -20,6 +20,7 @@ import com.airvox.location.AndroidPlaceReporter
 import com.airvox.map.AndroidRiderMap
 import com.airvox.playback.AndroidPlaybackController
 import com.airvox.vox.AndroidVox
+import com.airvox.voxy.AndroidVoxy
 
 class MainActivity : ComponentActivity() {
     private var androidAuth: AndroidAuthClient? = null
@@ -27,6 +28,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var playbackController: AndroidPlaybackController
     private lateinit var intercomSession: AndroidIntercomSession
     private lateinit var vox: AndroidVox
+    private lateinit var voxy: AndroidVoxy
     private lateinit var places: AndroidPlaceReporter
     private lateinit var riderMap: AndroidRiderMap
 
@@ -41,6 +43,12 @@ class MainActivity : ComponentActivity() {
             activity = this,
             session = intercomSession,
             playback = playbackController,
+        )
+        voxy = AndroidVoxy(
+            activity = this,
+            session = intercomSession,
+            playback = playbackController,
+            vox = vox,
         )
         places = AndroidPlaceReporter(
             activity = this,
@@ -70,6 +78,7 @@ class MainActivity : ComponentActivity() {
                 playback = playbackController,
                 bluetoothScanner = bluetoothScanner,
                 vox = vox,
+                voxy = voxy,
                 places = places,
                 map = riderMap,
                 auth = auth,
@@ -96,6 +105,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         androidAuth?.dispose()
         places.dispose()
+        voxy.dispose()
         vox.dispose()
         intercomSession.dispose()
         bluetoothScanner.dispose()

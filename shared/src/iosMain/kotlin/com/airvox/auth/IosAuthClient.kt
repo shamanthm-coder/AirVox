@@ -5,7 +5,6 @@ import androidx.compose.runtime.mutableStateOf
 import com.airvox.credits.CreditPlan
 import kotlin.coroutines.resume
 import kotlinx.cinterop.BetaInteropApi
-import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
@@ -13,10 +12,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -41,6 +41,7 @@ import platform.Foundation.setHTTPBody
 import platform.Foundation.setHTTPMethod
 import platform.Foundation.setValue
 import platform.Foundation.timeIntervalSince1970
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Firebase email sign-in for iPhone, over Firebase's REST API, so it needs no
@@ -74,7 +75,23 @@ class IosAuthClient(
                 )
             }
             tokens == null -> update { AuthState(phase = AuthPhase.Ready, configured = true) }
-            else -> scope.launch { runAuth { openSession() } }
+            else -> {
+                // Open the saved account at once. Firebase and the server are checked behind it.
+                val account = offlineAccount(displayName = null, needsProfile = false)
+                if (account != null) {
+                    saveRider(account)
+                    update {
+                        it.copy(
+                            phase = AuthPhase.Ready,
+                            account = account,
+                            busy = false,
+                            error = null,
+                            needsProfile = false,
+                        )
+                    }
+                }
+                scope.launch { runAuth { openSession() } }
+            }
         }
     }
 
@@ -105,6 +122,7 @@ class IosAuthClient(
             update { it.copy(busy = true, error = null) }
             runAuth {
                 val rider = patchProfile(idToken(), trimmed, phone = null, complete = false)
+                saveRider(rider)
                 update { it.copy(account = rider, busy = false, error = null) }
             }
         }
@@ -129,6 +147,7 @@ class IosAuthClient(
             update { it.copy(busy = true, error = null) }
             runAuth {
                 val rider = patchProfile(idToken(), trimmed, phone, complete = true)
+                saveRider(rider)
                 update { it.copy(account = rider, busy = false, error = null, needsProfile = false) }
             }
         }
@@ -276,7 +295,7 @@ class IosAuthClient(
             val token = runCatching { idToken() }.getOrNull()
             if (token != null) runCatching { send("DELETE", "$baseUrl/v1/session", token, body = null) }
             val remaining = 700L - (now() - started)
-            if (remaining > 0) delay(remaining)
+            if (remaining > 0) delay(remaining.milliseconds)
             saveTokens(null)
             update { AuthState(phase = AuthPhase.Ready, configured = configured) }
         }
@@ -338,24 +357,59 @@ class IosAuthClient(
     }
 
     private suspend fun openSession(displayName: String? = null, needsProfile: Boolean = false) {
-        val created = exchange(send("POST", "$baseUrl/v1/session", idToken(), body = "{}"))
+        try {
+            val created = exchange(send("POST", "$baseUrl/v1/session", idToken(), body = "{}"))
+            val name = displayName?.trim()?.takeIf { validName(it) }
+            val rider = if (name == null) {
+                created
+            } else {
+                // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
+                patchProfile(idToken(), name, phone = null, complete = false)
+                    .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+            }
+            saveRider(rider)
+            update {
+                it.copy(
+                    phase = AuthPhase.Ready,
+                    account = rider,
+                    busy = false,
+                    error = null,
+                    needsProfile = needsProfile && !rider.profileComplete,
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: SessionFailed) {
+            // A saved sign-in stays on this phone. No network must not send them back to Firebase.
+            if (error.signedOut || !error.message.orEmpty().startsWith("Can't reach")) throw error
+            val account = offlineAccount(displayName, needsProfile) ?: throw error
+            saveRider(account)
+            update {
+                it.copy(
+                    phase = AuthPhase.Ready,
+                    account = account,
+                    busy = false,
+                    error = null,
+                    needsProfile = needsProfile && !account.profileComplete,
+                )
+            }
+        }
+    }
+
+    private fun offlineAccount(displayName: String?, needsProfile: Boolean): RiderAccount? {
         val name = displayName?.trim()?.takeIf { validName(it) }
-        val rider = if (name == null) {
-            created
-        } else {
-            // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
-            patchProfile(idToken(), name, phone = null, complete = false)
-                .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+        val cached = loadRider()
+        if (cached != null) {
+            return cached.copy(displayName = name ?: cached.displayName, welcomeCredits = 0)
         }
-        update {
-            it.copy(
-                phase = AuthPhase.Ready,
-                account = rider,
-                busy = false,
-                error = null,
-                needsProfile = needsProfile && !rider.profileComplete,
-            )
-        }
+        val token = tokens?.idToken?.takeIf { it.isNotBlank() } ?: return null
+        val fromToken = riderFromToken(token) ?: return null
+        return fromToken.copy(
+            displayName = name ?: fromToken.displayName,
+            profileComplete = !needsProfile,
+            welcomeCredits = 0,
+            balanceOffset = 0,
+        )
     }
 
     /** A Firebase ID token that is good for at least another minute. */
@@ -370,8 +424,14 @@ class IosAuthClient(
             contentType = "application/x-www-form-urlencoded",
         )
         val parsed = parse(reply.body)
+        if (reply.status == 0) {
+            throw SessionFailed("Can't reach Firebase. Check the internet connection.", signedOut = false)
+        }
         if (reply.status !in 200..299) {
-            throw SessionFailed(firebaseMessage(parsed), signedOut = true)
+            val code = runCatching { parsed!!["error"]!!.jsonObject.string("message") }.getOrNull().orEmpty().uppercase()
+            val rejected = "TOKEN_EXPIRED" in code || "INVALID_REFRESH_TOKEN" in code ||
+                "USER_NOT_FOUND" in code || "USER_DISABLED" in code
+            throw SessionFailed(firebaseMessage(parsed), signedOut = rejected)
         }
         val fresh = Tokens(
             idToken = parsed?.string("id_token") ?: throw SessionFailed("Sign in again.", signedOut = true),
@@ -453,7 +513,7 @@ class IosAuthClient(
         return Tokens(
             idToken = store.stringForKey(KEY_ID).orEmpty(),
             refreshToken = refresh,
-            expiresAt = 0, // Refresh on start.
+            expiresAt = store.stringForKey(KEY_EXPIRES)?.toLongOrNull() ?: 0L,
         )
     }
 
@@ -462,10 +522,46 @@ class IosAuthClient(
         if (value == null) {
             store.removeObjectForKey(KEY_ID)
             store.removeObjectForKey(KEY_REFRESH)
+            store.removeObjectForKey(KEY_EXPIRES)
+            store.removeObjectForKey(KEY_RIDER)
         } else {
             store.setObject(value.idToken, KEY_ID)
             store.setObject(value.refreshToken, KEY_REFRESH)
+            store.setObject(value.expiresAt.toString(), KEY_EXPIRES)
         }
+    }
+
+    private fun saveRider(rider: RiderAccount) {
+        val body = buildJsonObject {
+            put("id", rider.id)
+            put("signInProvider", rider.signInProvider)
+            put("profileComplete", rider.profileComplete)
+            put("welcomeCredits", rider.welcomeCredits)
+            put("balanceOffset", rider.balanceOffset)
+            if (rider.phoneNumber != null) put("phoneNumber", rider.phoneNumber)
+            if (rider.email != null) put("email", rider.email)
+            if (rider.displayName != null) put("displayName", rider.displayName)
+            put("providers", buildJsonArray { rider.providers.forEach { add(JsonPrimitive(it)) } })
+        }
+        store.setObject(body.toString(), KEY_RIDER)
+    }
+
+    private fun loadRider(): RiderAccount? {
+        val raw = store.stringForKey(KEY_RIDER) ?: return null
+        val parsed = parse(raw) ?: return null
+        val id = parsed.string("id") ?: return null
+        if (id.isBlank()) return null
+        return RiderAccount(
+            id = id,
+            phoneNumber = parsed.string("phoneNumber"),
+            email = parsed.string("email"),
+            displayName = parsed.string("displayName"),
+            signInProvider = parsed.string("signInProvider").orEmpty(),
+            providers = runCatching { parsed["providers"]!!.jsonArray.map { it.jsonPrimitive.content } }.getOrDefault(emptyList()),
+            profileComplete = (parsed["profileComplete"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
+            balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
+        )
     }
 
     private fun parse(body: String): JsonObject? = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
@@ -478,7 +574,7 @@ class IosAuthClient(
 
     private class Reply(val status: Int, val body: String)
 
-    @OptIn(ExperimentalForeignApi::class, BetaInteropApi::class)
+    @OptIn(BetaInteropApi::class)
     private suspend fun send(
         method: String,
         url: String,
@@ -510,6 +606,8 @@ class IosAuthClient(
     private companion object {
         const val KEY_ID = "airvox.auth.idToken"
         const val KEY_REFRESH = "airvox.auth.refreshToken"
+        const val KEY_EXPIRES = "airvox.auth.expiresAt"
+        const val KEY_RIDER = "airvox.auth.rider"
         const val KEY_CHANNELS = "airvox.channels.queue"
 
         fun now(): Long = NSDate().timeIntervalSince1970.toLong()
@@ -517,6 +615,28 @@ class IosAuthClient(
 }
 
 private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull?.ifBlank { null }
+
+/** Reads the signed-in user from a saved Firebase ID token. The signature is not checked. */
+@OptIn(ExperimentalEncodingApi::class)
+private fun riderFromToken(token: String): RiderAccount? {
+    val payload = token.split('.').getOrNull(1) ?: return null
+    val padded = payload.replace('-', '+').replace('_', '/')
+        .let { it + "=".repeat((4 - it.length % 4) % 4) }
+    val text = runCatching { Base64.Default.decode(padded).decodeToString() }.getOrNull() ?: return null
+    val claims = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+    val id = claims.string("user_id") ?: claims.string("sub") ?: return null
+    val firebase = claims["firebase"] as? JsonObject
+    val provider = firebase?.string("sign_in_provider") ?: "password"
+    return RiderAccount(
+        id = id,
+        phoneNumber = null,
+        email = claims.string("email"),
+        displayName = claims.string("name"),
+        signInProvider = provider,
+        providers = listOf(provider),
+        profileComplete = true,
+    )
+}
 
 private fun parseRider(rider: JsonObject): RiderAccount = RiderAccount(
     id = rider.string("id").orEmpty(),

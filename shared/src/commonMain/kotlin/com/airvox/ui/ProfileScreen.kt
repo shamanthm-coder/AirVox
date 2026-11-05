@@ -101,6 +101,7 @@ fun ProfileScreen(auth: AuthClient) {
                 placeholder = "Name",
                 keyboard = KeyboardType.Text,
                 enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -184,7 +185,7 @@ private fun ProfileField(
     placeholder: String,
     keyboard: KeyboardType,
     enabled: Boolean,
-    modifier: Modifier = Modifier.fillMaxWidth(),
+    modifier: Modifier = Modifier,
 ) {
     OutlinedTextField(
         value = value,

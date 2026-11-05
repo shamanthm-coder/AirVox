@@ -41,7 +41,10 @@ import com.airvox.map.RiderMap
 import com.airvox.playback.PlaybackController
 import com.airvox.theme.AirvoxPalette
 import com.airvox.vox.Vox
+import com.airvox.voxy.Voxy
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 // The portal counts a rider as online for 5 minutes after a check-in.
 private const val HEARTBEAT_MS = 120_000L
@@ -59,6 +62,7 @@ fun AirvoxApp(
     playback: PlaybackController,
     bluetoothScanner: BluetoothEarphoneScanner,
     vox: Vox,
+    voxy: Voxy,
     places: PlaceReporter,
     map: RiderMap,
     auth: AuthClient,
@@ -77,11 +81,11 @@ fun AirvoxApp(
     var opening by remember { mutableStateOf(true) }
     var holdingRestore by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
-        delay(1600)
+        delay(1600.milliseconds)
         opening = false
         // A saved sign-in talks to the server in the background. Do not leave the
         // splash up if that call is slow or the phone cannot reach the server.
-        delay(2000)
+        delay(2000.milliseconds)
         holdingRestore = false
     }
     // Create account is only a choice on the signed-out screens. Leaving it set
@@ -156,10 +160,23 @@ fun AirvoxApp(
 
     // Tells the Airvox API this rider is online, so the admin portal can count them.
     val riderId = authState.account?.id
+    val riderName = authState.account?.displayName?.trim().orEmpty()
+    LaunchedEffect(riderId, riderName) {
+        if (riderName.isBlank()) {
+            voxy.stop()
+            return@LaunchedEffect
+        }
+        voxy.start(riderName)
+        try {
+            awaitCancellation()
+        } finally {
+            voxy.stop()
+        }
+    }
     LaunchedEffect(riderId) {
         if (riderId == null) return@LaunchedEffect
         while (true) {
-            delay(HEARTBEAT_MS)
+            delay(HEARTBEAT_MS.milliseconds)
             val live = session.state.value
             val onChannel = live.connection == IntercomConnection.Connected ||
                 live.connection == IntercomConnection.Connecting
@@ -193,7 +210,7 @@ fun AirvoxApp(
                 return@LaunchedEffect
             }
             auth.recordCredits("consume", CREDIT_PER_MINUTE)
-            delay(60_000)
+            delay(60_000.milliseconds)
         }
     }
 
@@ -243,6 +260,7 @@ fun AirvoxApp(
                 Destination.Channel -> ChannelScreen(
                     session = session,
                     vox = vox,
+                    voxy = voxy,
                     playback = playback,
                     bluetoothScanner = bluetoothScanner,
                     credits = wallet.state.value.credits,

@@ -144,7 +144,7 @@ class RiderStore(
         Files.writeString(tmp, json.encodeToString(RiderFile.serializer(), RiderFile(riders.values.toList(), removed.toList())))
         try {
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-        } catch (error: AtomicMoveNotSupportedException) {
+        } catch (_: AtomicMoveNotSupportedException) {
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING)
         }
     }

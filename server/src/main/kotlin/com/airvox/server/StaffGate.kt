@@ -52,7 +52,7 @@ class SupabaseStaffGate(
             .build()
         val response = try {
             http.send(request, HttpResponse.BodyHandlers.ofString())
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             throw StaffCheckUnavailable("Couldn't check staff access.")
         }
         if (response.statusCode() == 401 || response.statusCode() == 403) return null

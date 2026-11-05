@@ -24,7 +24,7 @@ fun interface AccountDeleter {
 
 /**
  * Deletes a Firebase Authentication user.
- * Uses a service account when [serviceAccountJson] is set. Otherwise asks
+ * Uses a service account when [serviceAccountJson] is set. Otherwise, asks
  * Google with the project's web API key, which only works for some projects.
  */
 class FirebaseAccountDeleter(

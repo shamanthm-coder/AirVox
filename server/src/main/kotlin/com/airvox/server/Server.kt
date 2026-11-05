@@ -169,7 +169,7 @@ fun Application.airvoxApi(
             if (call.stopIfDeleted(store, identity.uid)) return@get
             try {
                 call.respond(PlansResponse(sync.activePlans()))
-            } catch (error: Exception) {
+            } catch (_: Exception) {
                 call.respond(
                     HttpStatusCode.ServiceUnavailable,
                     ApiError("plans_unavailable", "Plans aren't available yet."),

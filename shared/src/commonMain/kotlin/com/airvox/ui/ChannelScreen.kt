@@ -21,9 +21,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -64,6 +66,8 @@ import com.airvox.intercom.IntercomConnection
 import com.airvox.intercom.IntercomSession
 import com.airvox.playback.PlaybackController
 import com.airvox.vox.Vox
+import com.airvox.voxy.Voxy
+import com.airvox.voxy.VoxyState
 import com.airvox.theme.AirvoxPalette
 import org.jetbrains.compose.resources.painterResource
 
@@ -71,6 +75,7 @@ import org.jetbrains.compose.resources.painterResource
 fun ChannelScreen(
     session: IntercomSession,
     vox: Vox,
+    voxy: Voxy,
     playback: PlaybackController,
     bluetoothScanner: BluetoothEarphoneScanner,
     credits: Int,
@@ -78,6 +83,7 @@ fun ChannelScreen(
 ) {
     val intercom by session.state
     val voxState by vox.state
+    val voxyState by voxy.state
     val audio = bluetoothScanner.scanResult.value
     var roomCode by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -152,6 +158,12 @@ fun ChannelScreen(
             )
         }
 
+        Spacer(Modifier.height(16.dp))
+        VoxyCard(
+            state = voxyState,
+            canBackground = voxy.canBackground,
+            onBackground = voxy::setBackground,
+        )
         Spacer(Modifier.height(16.dp))
         AudioControlCard(
             playback = playback,
@@ -241,7 +253,7 @@ fun ChannelScreen(
                     .fillMaxWidth()
                     .height(48.dp),
                 shape = RoundedCornerShape(14.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, AirvoxPalette.Line),
+                border = BorderStroke(1.dp, AirvoxPalette.Line),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = AirvoxPalette.White,
                     disabledContentColor = AirvoxPalette.Dim,
@@ -364,6 +376,94 @@ private fun talkHint(
 }
 
 @Composable
+private fun VoxyCard(
+    state: VoxyState,
+    canBackground: Boolean,
+    onBackground: (Boolean) -> Unit,
+) {
+    var confirmLock by remember { mutableStateOf(false) }
+    AirvoxCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "Voxy", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(4.dp))
+                Text(text = state.line, style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.size(12.dp))
+            StatusPill(if (state.listening) "Listening" else "Quiet")
+        }
+        if (canBackground) {
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = "While locked", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Listens when the phone is locked. A notification stays on.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AirvoxPalette.Dim,
+                        fontSize = 13.sp,
+                    )
+                }
+                Spacer(Modifier.size(12.dp))
+                val on = state.background
+                Text(
+                    text = if (on) "On" else "Off",
+                    color = if (on) AirvoxPalette.Black else AirvoxPalette.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(100.dp))
+                        .background(if (on) AirvoxPalette.White else Color.Transparent)
+                        .border(
+                            width = 1.dp,
+                            color = if (on) AirvoxPalette.White else AirvoxPalette.Line,
+                            shape = RoundedCornerShape(100.dp),
+                        )
+                        .clickable {
+                            if (on) onBackground(false) else confirmLock = true
+                        }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
+        }
+    }
+    if (confirmLock) {
+        AlertDialog(
+            onDismissRequest = { confirmLock = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLock = false
+                    onBackground(true)
+                }) {
+                    Text("Allow", color = AirvoxPalette.White, fontWeight = FontWeight.Medium)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLock = false }) {
+                    Text("Not now", color = AirvoxPalette.Muted)
+                }
+            },
+            title = { Text("Listen while the phone is locked?") },
+            text = {
+                Text(
+                    "Voxy can hear you when the screen is locked. Android will ask for notification access, and may ask to leave battery use unrestricted. A notification stays visible the whole time the microphone is on. Turn this off here whenever you want.",
+                )
+            },
+            containerColor = AirvoxPalette.Surface,
+            titleContentColor = AirvoxPalette.White,
+            textContentColor = AirvoxPalette.Muted,
+        )
+    }
+}
+
+@Composable
 private fun VoxRow(
     enabled: Boolean,
     onToggle: () -> Unit,
@@ -373,7 +473,7 @@ private fun VoxRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = "Vox", style = MaterialTheme.typography.titleMedium)
+            Text(text = "Voxy", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
             Text(
                 text = "Pauses the music and connects your voice.",

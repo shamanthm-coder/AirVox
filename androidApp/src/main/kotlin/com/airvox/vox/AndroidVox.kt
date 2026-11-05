@@ -41,6 +41,7 @@ class AndroidVox(
     private var pendingPassword = ""
     private var joinedPassword = ""
     private var pendingPath = ChannelPath.Hotspot
+    private var earPaused = false
 
     @Volatile private var hearingSpeech = false
     @Volatile private var earRunning = false
@@ -129,6 +130,13 @@ class AndroidVox(
         mainHandler.removeCallbacks(autoConnect)
         stopEar()
         session.leave()
+        sync()
+    }
+
+    override fun setEarPaused(paused: Boolean) {
+        if (earPaused == paused) return
+        earPaused = paused
+        if (paused) stopEar()
         sync()
     }
 
@@ -270,7 +278,7 @@ class AndroidVox(
         resumeMusicIfQuiet()
         val onChannel = intercom.connection == IntercomConnection.Connecting ||
             intercom.connection == IntercomConnection.Connected
-        if (onChannel && !session.state.value.localTalking) startEar() else stopEar()
+        if (onChannel && !session.state.value.localTalking && !earPaused) startEar() else stopEar()
         val line = when {
             heldOff -> "Vox left the channel. Tap Join and Vox will connect again."
             intercom.connection == IntercomConnection.Connected ->

@@ -36,6 +36,12 @@ interface Vox {
 
     fun toggleTalk()
 
+    /**
+     * Leaves the microphone free while Voxy is listening for "hey Voxy".
+     * The channel still takes the mic when someone is talking.
+     */
+    fun setEarPaused(paused: Boolean)
+
     fun dispose()
 }
 
@@ -57,6 +63,8 @@ class UnavailableVox : Vox {
     override fun leave() = Unit
 
     override fun toggleTalk() = Unit
+
+    override fun setEarPaused(paused: Boolean) = Unit
 
     override fun dispose() = Unit
 }

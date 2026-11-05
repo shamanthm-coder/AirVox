@@ -13,7 +13,6 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -100,12 +99,12 @@ class FirebaseIdTokenVerifier(
     private fun parseObject(part: String): JsonObject {
         val text = try {
             String(Base64.getUrlDecoder().decode(part), Charsets.UTF_8)
-        } catch (error: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
             throw TokenRejected("Firebase ID token is not valid.")
         }
         return try {
             json.parseToJsonElement(text).jsonObject
-        } catch (error: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
             throw TokenRejected("Firebase ID token is not valid.")
         }
     }
@@ -113,7 +112,7 @@ class FirebaseIdTokenVerifier(
     private fun signatureMatches(header: String, payload: String, signature: String, key: PublicKey): Boolean {
         val signed = try {
             Base64.getUrlDecoder().decode(signature)
-        } catch (error: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
             throw TokenRejected("Firebase ID token is not valid.")
         }
         return try {
@@ -121,7 +120,7 @@ class FirebaseIdTokenVerifier(
             verifier.initVerify(key)
             verifier.update("$header.$payload".toByteArray(Charsets.UTF_8))
             verifier.verify(signed)
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             throw TokenRejected("Firebase ID token is not valid.")
         }
     }
@@ -180,7 +179,7 @@ class GoogleCertSigningKeys(
             .build()
         val response = try {
             client.send(request, HttpResponse.BodyHandlers.ofString())
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             throw TokenCheckUnavailable("Could not reach Google to check the sign-in.")
         }
         if (response.statusCode() != HttpsURLConnection.HTTP_OK) {
@@ -209,7 +208,7 @@ class GoogleCertSigningKeys(
 internal fun parseCertificates(body: String): Map<String, PublicKey> {
     val parsed = try {
         Json.parseToJsonElement(body).jsonObject
-    } catch (error: IllegalArgumentException) {
+    } catch (_: IllegalArgumentException) {
         throw TokenCheckUnavailable("Google did not return signing keys.")
     }
     val factory = CertificateFactory.getInstance("X.509")
@@ -218,7 +217,7 @@ internal fun parseCertificates(body: String): Map<String, PublicKey> {
         val pem = (value as? JsonPrimitive)?.content ?: continue
         val certificate = try {
             factory.generateCertificate(pem.byteInputStream(Charsets.US_ASCII)) as X509Certificate
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             continue
         }
         keys[kid] = certificate.publicKey

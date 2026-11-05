@@ -12,6 +12,7 @@ import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.auth.api.signin.GoogleSignInStatusCodes
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.CommonStatusCodes
+import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseUser
@@ -52,6 +53,7 @@ class AndroidAuthClient(
     private val baseUrl = apiUrl.trim().trimEnd('/')
     private val jsonType = "application/json".toMediaType()
     private val channelPrefs = activity.getSharedPreferences("airvox_channels", Context.MODE_PRIVATE)
+    private val accountPrefs = activity.getSharedPreferences("airvox_account", Context.MODE_PRIVATE)
     private val channelQueue = ArrayDeque<JSONObject>()
     private val _state = mutableStateOf(AuthState(phase = AuthPhase.Restoring))
     override val state: State<AuthState> = _state
@@ -84,7 +86,11 @@ class AndroidAuthClient(
                 )
             }
             current == null -> update { AuthState(phase = AuthPhase.Ready, configured = true) }
-            else -> scope.launch { runAuth { openSession(current) } }
+            else -> {
+                // Open the saved account at once. Firebase and the server are checked behind it.
+                enterOffline(current, displayName = null, needsProfile = false)
+                scope.launch { runAuth { openSession(current) } }
+            }
         }
     }
 
@@ -166,6 +172,7 @@ class AndroidAuthClient(
                     ?: throw SessionFailed("Sign in again.", signedOut = true)
                 val rider = withContext(Dispatchers.IO) { patchProfile(token, trimmed, phone = null, complete = false) }
                 val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = true) }
+                saveAccount(rider)
                 update { it.copy(account = rider, busy = false, error = warning) }
             }
         }
@@ -194,6 +201,7 @@ class AndroidAuthClient(
                     ?: throw SessionFailed("Sign in again.", signedOut = true)
                 val rider = withContext(Dispatchers.IO) { patchProfile(token, trimmed, phone, complete = true) }
                 val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = true) }
+                saveAccount(rider)
                 update { it.copy(account = rider, busy = false, error = warning, needsProfile = false) }
             }
         }
@@ -353,6 +361,7 @@ class AndroidAuthClient(
                 runCatching { withContext(Dispatchers.IO) { deleteSession(token) } }
             }
             firebase?.signOut()
+            clearAccount()
             val remaining = 700L - (System.currentTimeMillis() - started)
             if (remaining > 0) delay(remaining)
             update { AuthState(phase = AuthPhase.Ready, configured = configured) }
@@ -409,29 +418,135 @@ class AndroidAuthClient(
     }
 
     private suspend fun openSession(user: FirebaseUser, displayName: String? = null, needsProfile: Boolean = false) {
-        val token = user.getIdToken(false).await().token
-            ?: throw SessionFailed("Firebase did not return a sign-in token.", signedOut = false)
-        val rider = withContext(Dispatchers.IO) {
-            val created = postSession(token)
-            val name = displayName?.trim()
-            if (name.isNullOrEmpty()) {
-                created
-            } else {
-                // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
-                patchProfile(token, name, phone = null, complete = false)
-                    .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+        try {
+            val token = user.getIdToken(false).await().token
+            if (token == null) {
+                if (!enterOffline(user, displayName, needsProfile)) {
+                    throw SessionFailed("Firebase did not return a sign-in token.", signedOut = false)
+                }
+                return
             }
+            val rider = withContext(Dispatchers.IO) {
+                val created = postSession(token)
+                val name = displayName?.trim()
+                if (name.isNullOrEmpty()) {
+                    created
+                } else {
+                    // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
+                    patchProfile(token, name, phone = null, complete = false)
+                        .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+                }
+            }
+            val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = false) }
+            saveAccount(rider)
+            update {
+                it.copy(
+                    phase = AuthPhase.Ready,
+                    account = rider,
+                    busy = false,
+                    error = warning,
+                    needsProfile = needsProfile && !rider.profileComplete,
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            // Firebase keeps the user on the phone. A dead network must not dump them back on sign-in.
+            if (!canStayOffline(error) || !enterOffline(user, displayName, needsProfile)) throw error
         }
-        val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = false) }
+    }
+
+    private fun enterOffline(user: FirebaseUser, displayName: String?, needsProfile: Boolean): Boolean {
+        val account = offlineAccount(user, displayName) ?: return false
+        saveAccount(account)
         update {
             it.copy(
                 phase = AuthPhase.Ready,
-                account = rider,
+                account = account,
                 busy = false,
-                error = warning,
-                needsProfile = needsProfile && !rider.profileComplete,
+                error = null,
+                needsProfile = needsProfile && !account.profileComplete,
             )
         }
+        return true
+    }
+
+    /** Last rider this phone opened, or the Firebase user already stored on the device. */
+    private fun offlineAccount(user: FirebaseUser, displayName: String?): RiderAccount? {
+        if (user.uid.isBlank()) return null
+        val cached = readAccount()?.takeIf { it.id == user.uid }
+        val name = displayName?.trim()?.takeIf { it.isNotEmpty() }
+        if (cached != null) {
+            return cached.copy(displayName = name ?: cached.displayName, welcomeCredits = 0)
+        }
+        val providers = user.providerData.mapNotNull { it.providerId }.filter { it.isNotBlank() && it != "firebase" }
+        val keptName = name ?: user.displayName?.takeIf { it.isNotBlank() }
+        return RiderAccount(
+            id = user.uid,
+            phoneNumber = user.phoneNumber?.takeIf { it.isNotBlank() },
+            email = user.email?.takeIf { it.isNotBlank() },
+            displayName = keptName,
+            signInProvider = providers.firstOrNull() ?: "password",
+            providers = providers.ifEmpty { listOf("password") },
+            profileComplete = !keptName.isNullOrBlank(),
+            welcomeCredits = 0,
+            balanceOffset = 0,
+        )
+    }
+
+    private fun canStayOffline(error: Exception): Boolean {
+        if (error is SessionFailed) {
+            return !error.signedOut && error.message.orEmpty().startsWith("Can't reach")
+        }
+        if (error is IOException || error is FirebaseNetworkException) return true
+        val code = (error as? FirebaseAuthException)?.errorCode?.uppercase().orEmpty()
+        if ("NETWORK" in code) return true
+        val text = error.message.orEmpty()
+        return text.contains("network", ignoreCase = true) ||
+            text.contains("offline", ignoreCase = true) ||
+            text.contains("Unable to resolve host", ignoreCase = true) ||
+            text.contains("timeout", ignoreCase = true) ||
+            text.contains("unreachable", ignoreCase = true)
+    }
+
+    private fun saveAccount(rider: RiderAccount) {
+        val json = JSONObject()
+            .put("id", rider.id)
+            .put("signInProvider", rider.signInProvider)
+            .put("profileComplete", rider.profileComplete)
+            .put("welcomeCredits", rider.welcomeCredits)
+            .put("balanceOffset", rider.balanceOffset)
+            .put("providers", JSONArray(rider.providers))
+        json.putNullable("phoneNumber", rider.phoneNumber)
+        json.putNullable("email", rider.email)
+        json.putNullable("displayName", rider.displayName)
+        accountPrefs.edit().putString(KEY_RIDER, json.toString()).apply()
+    }
+
+    private fun readAccount(): RiderAccount? {
+        val raw = accountPrefs.getString(KEY_RIDER, null) ?: return null
+        val rider = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val id = rider.optString("id")
+        if (id.isBlank()) return null
+        return RiderAccount(
+            id = id,
+            phoneNumber = rider.nullableString("phoneNumber"),
+            email = rider.nullableString("email"),
+            displayName = rider.nullableString("displayName"),
+            signInProvider = rider.optString("signInProvider"),
+            providers = rider.optJSONArray("providers").toList(),
+            profileComplete = rider.optBoolean("profileComplete", false),
+            welcomeCredits = rider.optInt("welcomeCredits", 0),
+            balanceOffset = rider.optInt("balanceOffset", 0),
+        )
+    }
+
+    private fun clearAccount() {
+        accountPrefs.edit().remove(KEY_RIDER).apply()
+    }
+
+    private fun JSONObject.putNullable(key: String, value: String?) {
+        if (value.isNullOrBlank()) put(key, JSONObject.NULL) else put(key, value)
     }
 
     private fun rememberRider(user: FirebaseUser, rider: RiderAccount, profileSaved: Boolean): String? {
@@ -451,7 +566,10 @@ class AndroidAuthClient(
         } catch (error: CancellationException) {
             throw error
         } catch (error: SessionFailed) {
-            if (error.signedOut) firebase?.signOut()
+            if (error.signedOut) {
+                firebase?.signOut()
+                clearAccount()
+            }
             update {
                 it.copy(
                     phase = AuthPhase.Ready,
@@ -532,6 +650,7 @@ class AndroidAuthClient(
 // Lets the Airvox API record which app the rider uses, for the admin portal.
 private const val PLATFORM_HEADER = "X-Airvox-Platform"
 private const val PLATFORM = "Android"
+private const val KEY_RIDER = "rider"
 
 private fun validEmail(value: String): Boolean {
     val at = value.indexOf('@')
@@ -579,6 +698,7 @@ private fun e164(value: String): String? {
 }
 
 private fun friendly(error: Throwable): String {
+    if (error is FirebaseNetworkException) return "No internet. Sign-in needs a connection."
     when (error) {
         is FirebaseAuthException -> {
             val code = error.errorCode.uppercase()
@@ -590,7 +710,7 @@ private fun friendly(error: Throwable): String {
                 "WRONG_PASSWORD" in code || "INVALID_CREDENTIAL" in code -> "Email or password is incorrect."
                 "USER_NOT_FOUND" in code -> "No account uses that email. Create one first."
                 "WEAK_PASSWORD" in code -> "Use a password of at least 6 characters."
-                "NETWORK" in code -> "No internet. Google sign-in needs a connection."
+                "NETWORK" in code -> "No internet. Sign-in needs a connection."
                 "WEB_CONTEXT_CANCELED" in code -> "Google sign-in was cancelled."
                 "APP_NOT_AUTHORIZED" in code || "MISSING_CLIENT_IDENTIFIER" in code || "DEVELOPER_ERROR" in code ->
                     googleBlocked()

@@ -394,7 +394,7 @@ private fun AuthField(
     onValueChange: (String) -> Unit,
     placeholder: String,
     keyboard: KeyboardType,
-    modifier: Modifier = Modifier.fillMaxWidth(),
+    modifier: Modifier = Modifier,
     password: Boolean = false,
     enabled: Boolean = true,
 ) {
@@ -421,7 +421,7 @@ private fun AuthField(
             null
         },
         keyboardOptions = KeyboardOptions(keyboardType = keyboard),
-        modifier = modifier,
+        modifier = modifier.fillMaxWidth(),
         shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = AirvoxPalette.White,
