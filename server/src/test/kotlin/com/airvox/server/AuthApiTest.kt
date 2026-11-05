@@ -18,6 +18,7 @@ import java.security.Signature
 import java.time.Instant
 import java.util.Base64
 import kotlin.io.path.createTempDirectory
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -201,6 +202,28 @@ class AuthApiTest {
             assertEquals(HttpStatusCode.NoContent, beat.status)
         }
         assertEquals(listOf(430), balances)
+    }
+
+    @Test
+    fun anExistingAccountDoesNotGetWelcomeCreditsAgain() {
+        var grants = 0
+        val sync = object : RiderSync {
+            override fun riderSeen(rider: Rider, platform: String?) = Unit
+            override fun existingAccount(firebaseUid: String) = true
+            override fun recordCredits(rider: Rider, kind: String, credits: Int) {
+                grants += 1
+            }
+        }
+        withApi(sync = sync) {
+            val created = client.post("/v1/session") { bearer("good") }
+            assertEquals(HttpStatusCode.OK, created.status)
+            assertEquals("0", rootField(created.bodyAsText(), "welcomeCredits"))
+            assertEquals("true", riderField(created.bodyAsText(), "profileComplete"))
+            val again = client.post("/v1/session") { bearer("good") }
+            assertEquals("0", rootField(again.bodyAsText(), "welcomeCredits"))
+            assertEquals("true", riderField(again.bodyAsText(), "profileComplete"))
+        }
+        assertEquals(0, grants)
     }
 
     @Test
@@ -432,6 +455,27 @@ class AuthApiTest {
             assertEquals(null, reloaded.find("uid-1"))
             assertTrue(reloaded.isRemoved("uid-1"))
             assertFailsWith<RiderRemoved> { reloaded.upsert(identity) }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aDuplicateWelcomeGrantIsTakenOffTheReportedBalance() {
+        val dir = createTempDirectory("airvox-riders")
+        val file = dir.resolve("riders.json")
+        try {
+            file.writeText(
+                """
+                {"riders":[{"id":"uid-1","phoneNumber":null,"email":"ben1@yopmail.com","displayName":null,"displayNameCustom":false,"profileComplete":false,"welcomeGranted":true,"balanceOffset":20,"signInProvider":"password","providers":["password"],"createdAt":"2026-11-04T09:12:57Z","lastSeenAt":"2026-11-05T04:41:02Z"}],"removed":[]}
+                """.trimIndent(),
+            )
+            val store = RiderStore(file)
+            assertEquals(20, store.balanceOffset("uid-1"))
+            assertEquals(20, store.walletToStore("uid-1", 40, clearOffset = false))
+            assertEquals(20, store.walletToStore("uid-1", 20, clearOffset = true))
+            assertEquals(0, store.balanceOffset("uid-1"))
+            assertEquals(20, store.walletToStore("uid-1", 20, clearOffset = false))
         } finally {
             dir.toFile().deleteRecursively()
         }

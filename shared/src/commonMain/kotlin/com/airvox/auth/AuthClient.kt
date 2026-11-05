@@ -14,6 +14,8 @@ data class RiderAccount(
     val profileComplete: Boolean = false,
     /** Free credits given once, on this account's first sign-in. Later sessions send 0. */
     val welcomeCredits: Int = 0,
+    /** Extra welcome credits to remove. 0 once the phone has taken them off. */
+    val balanceOffset: Int = 0,
 )
 
 enum class AuthPhase {
@@ -28,6 +30,8 @@ data class AuthState(
     val error: String? = null,
     val configured: Boolean = false,
     val pendingSession: Boolean = false,
+    /** True only while a new account still needs a name and mobile. Sign-in leaves this false. */
+    val needsProfile: Boolean = false,
 )
 
 /**
@@ -57,7 +61,7 @@ interface AuthClient {
      * Tells the Airvox API the signed-in rider still has the app open, and how many credits are on the phone.
      * [room] and [mode] are set while they are on a channel, so the portal can keep that channel live.
      */
-    fun heartbeat(credits: Int, room: String = "", mode: String = "") = Unit
+    fun heartbeat(credits: Int, room: String = "", mode: String = "", clearOffset: Boolean = false) = Unit
 
     /** A rider created or left a channel. The phone keeps it until the server accepts it. */
     fun reportChannel(room: String, mode: String, action: String) = Unit

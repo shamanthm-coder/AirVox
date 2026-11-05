@@ -42,6 +42,12 @@ fun interface RiderSync {
     fun welcomeCredits(): Int = 20
 
     /**
+     * True when this Firebase account already has a portal row.
+     * False when it does not. Null when the lookup failed, so a blip does not grant credits.
+     */
+    fun existingAccount(firebaseUid: String): Boolean? = false
+
+    /**
      * A rider created or left a channel. [action] is "join", "leave", or "here".
      * [at] is the phone's time, so an offline channel keeps the time it really started.
      */
@@ -89,6 +95,16 @@ class SupabaseRiderSync(
         val rows = Json.parseToJsonElement(body).jsonArray
         if (rows.isEmpty()) return 20
         return rows.first().jsonObject["welcome_credits"]!!.jsonPrimitive.content.toInt()
+    }
+
+    override fun existingAccount(firebaseUid: String): Boolean? {
+        return try {
+            val saved = get("app_users?firebase_uid=eq.${encode(firebaseUid)}&select=id")
+            Json.parseToJsonElement(saved).jsonArray.isNotEmpty()
+        } catch (error: Exception) {
+            System.err.println("Supabase account lookup failed for rider $firebaseUid: ${error.message}")
+            null
+        }
     }
 
     override fun recordCredits(rider: Rider, kind: String, credits: Int) {

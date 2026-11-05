@@ -45,6 +45,8 @@ class RiderStore(
             displayName = name,
             displayNameCustom = existing?.displayNameCustom == true,
             profileComplete = existing?.profileComplete == true,
+            welcomeGranted = existing?.welcomeGranted == true,
+            balanceOffset = existing?.balanceOffset ?: 0,
             signInProvider = identity.signInProvider,
             providers = identity.providers.ifEmpty { listOf(identity.signInProvider) },
             createdAt = existing?.createdAt ?: now,
@@ -83,6 +85,47 @@ class RiderStore(
 
     fun find(uid: String): Rider? = synchronized(lock) {
         riders[uid]?.toPublic()
+    }
+
+    /** An account that already exists does not have to enter a name and mobile again. */
+    fun acceptReturningRider(uid: String): Rider? = synchronized(lock) {
+        val existing = riders[uid] ?: return null
+        if (existing.profileComplete) return existing.toPublic()
+        val stored = existing.copy(profileComplete = true, lastSeenAt = clock().toString())
+        riders[uid] = stored
+        persist()
+        stored.toPublic()
+    }
+
+    fun welcomeGranted(uid: String): Boolean = synchronized(lock) {
+        riders[uid]?.welcomeGranted == true
+    }
+
+    fun markWelcomeGranted(uid: String) {
+        synchronized(lock) {
+            val existing = riders[uid] ?: return
+            if (existing.welcomeGranted) return
+            riders[uid] = existing.copy(welcomeGranted = true)
+            persist()
+        }
+    }
+
+    fun balanceOffset(uid: String): Int = synchronized(lock) {
+        (riders[uid]?.balanceOffset ?: 0).coerceAtLeast(0)
+    }
+
+    /** Balance to store. [clearOffset] means the phone already removed the correction itself. */
+    fun walletToStore(uid: String, reported: Int, clearOffset: Boolean): Int = synchronized(lock) {
+        val amount = reported.coerceIn(0, 1_000_000)
+        val existing = riders[uid] ?: return amount
+        if (clearOffset) {
+            if (existing.balanceOffset != 0) {
+                riders[uid] = existing.copy(balanceOffset = 0)
+                persist()
+            }
+            return amount
+        }
+        return (amount - existing.balanceOffset.coerceAtLeast(0)).coerceAtLeast(0)
     }
 
     /** Drops the rider and remembers the id, so a later sign-in cannot write them back. */

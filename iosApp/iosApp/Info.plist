@@ -27,6 +27,17 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Airvox uses Bluetooth to find phones on a Bluetooth channel.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_airvox-ch._tcp</string>
+		<string>_airvox-ch._udp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Airvox finds other phones on this Wi-Fi hotspot or Bluetooth channel.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Airvox uses the microphone so you can talk on a channel.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Airvox shows where you are on the map and shares it with the riders on your channel. GPS works without internet.</string>
 	<key>UIApplicationSceneManifest</key>

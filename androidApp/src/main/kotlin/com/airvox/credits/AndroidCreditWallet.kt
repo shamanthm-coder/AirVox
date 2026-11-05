@@ -13,6 +13,18 @@ fun bindUserCredits(context: Context, wallet: CreditWallet, userId: String) {
     wallet.bind(balance) { next -> write(prefs, next) }
 }
 
+fun offsetAlreadyRemoved(context: Context, userId: String, offset: Int): Boolean {
+    val prefs = context.getSharedPreferences("airvox_credits_$userId", Context.MODE_PRIVATE)
+    return prefs.getInt("offset_removed", 0) == offset
+}
+
+fun markOffsetRemoved(context: Context, userId: String, offset: Int) {
+    context.getSharedPreferences("airvox_credits_$userId", Context.MODE_PRIVATE)
+        .edit()
+        .putInt("offset_removed", offset)
+        .apply()
+}
+
 private fun claimLegacy(context: Context, userId: String): CreditBalance? {
     val legacy = context.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
     if (!legacy.contains("credits")) return null

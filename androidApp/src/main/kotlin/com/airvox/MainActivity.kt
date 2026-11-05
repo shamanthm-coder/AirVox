@@ -11,6 +11,8 @@ import com.airvox.auth.AndroidAuthClient
 import com.airvox.credits.CreditBalance
 import com.airvox.credits.CreditWallet
 import com.airvox.credits.bindUserCredits
+import com.airvox.credits.markOffsetRemoved
+import com.airvox.credits.offsetAlreadyRemoved
 import com.airvox.auth.UnavailableAuthClient
 import com.airvox.bluetooth.AndroidBluetoothEarphoneScanner
 import com.airvox.intercom.AndroidIntercomSession
@@ -73,6 +75,12 @@ class MainActivity : ComponentActivity() {
                 auth = auth,
                 wallet = credits,
                 bindWallet = { userId -> bindUserCredits(this@MainActivity, credits, userId) },
+                offsetAlreadyRemoved = { userId, offset ->
+                    offsetAlreadyRemoved(this@MainActivity, userId, offset)
+                },
+                markOffsetRemoved = { userId, offset ->
+                    markOffsetRemoved(this@MainActivity, userId, offset)
+                },
             )
         }
         bluetoothScanner.refreshAudioOutput()

@@ -37,6 +37,12 @@ class CreditWallet(
         update { it.copy(credits = it.credits + amount) }
     }
 
+    /** Removes credits that were added by mistake, such as a second welcome grant. */
+    fun remove(amount: Int) {
+        if (amount <= 0) return
+        update { it.copy(credits = (it.credits - amount).coerceAtLeast(0)) }
+    }
+
     /** One minute on a channel costs [CREDIT_PER_MINUTE]. Returns false when the balance is empty. */
     fun spendMinute(): Boolean {
         if (_state.value.credits < CREDIT_PER_MINUTE) return false

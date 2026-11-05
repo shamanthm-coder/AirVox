@@ -6,7 +6,11 @@ import androidx.compose.ui.window.ComposeUIViewController
 import com.airvox.auth.IosAuthClient
 import com.airvox.credits.CreditWallet
 import com.airvox.credits.bindUserCredits
+import com.airvox.credits.markOffsetRemoved
+import com.airvox.credits.offsetAlreadyRemoved
+import com.airvox.intercom.IosIntercomSession
 import com.airvox.location.IosPlaceReporter
+import com.airvox.vox.IosVox
 
 fun MainViewController() = ComposeUIViewController(
     // The default waits to slide the field above the keyboard before showing it.
@@ -18,10 +22,16 @@ fun MainViewController() = ComposeUIViewController(
     val places = remember { IosPlaceReporter() }
     val auth = remember { IosAuthClient(IosConfig.FIREBASE_API_KEY, IosConfig.AIRVOX_API_URL) }
     val wallet = remember { CreditWallet() }
+    val session = remember { IosIntercomSession() }
+    val vox = remember { IosVox(session) }
     App(
+        session = session,
+        vox = vox,
         places = places,
         auth = auth,
         wallet = wallet,
         bindWallet = { userId -> bindUserCredits(wallet, userId) },
+        offsetAlreadyRemoved = { userId, offset -> offsetAlreadyRemoved(userId, offset) },
+        markOffsetRemoved = { userId, offset -> markOffsetRemoved(userId, offset) },
     )
 }

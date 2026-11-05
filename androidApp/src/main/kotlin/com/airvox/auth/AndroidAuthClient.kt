@@ -194,7 +194,7 @@ class AndroidAuthClient(
                     ?: throw SessionFailed("Sign in again.", signedOut = true)
                 val rider = withContext(Dispatchers.IO) { patchProfile(token, trimmed, phone, complete = true) }
                 val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = true) }
-                update { it.copy(account = rider, busy = false, error = warning) }
+                update { it.copy(account = rider, busy = false, error = warning, needsProfile = false) }
             }
         }
     }
@@ -282,7 +282,7 @@ class AndroidAuthClient(
         scope.launch { flushChannels() }
     }
 
-    override fun heartbeat(credits: Int, room: String, mode: String) {
+    override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
         val user = firebase?.currentUser ?: return
         if (_state.value.account == null) return
         scope.launch {
@@ -291,6 +291,7 @@ class AndroidAuthClient(
                 val token = user.getIdToken(false).await().token ?: return@launch
                 withContext(Dispatchers.IO) {
                     val body = JSONObject().put("credits", credits)
+                    if (clearOffset) body.put("clearOffset", true)
                     val channel = normalizeChannel(room, mode)
                     if (channel != null) {
                         body.put("room", channel.first).put("mode", channel.second)
@@ -402,12 +403,12 @@ class AndroidAuthClient(
                         runCatching { user.updateProfile(profile).await() }
                     }
                 }
-                openSession(user, if (create) trimmedName else null)
+                openSession(user, if (create) trimmedName else null, needsProfile = create)
             }
         }
     }
 
-    private suspend fun openSession(user: FirebaseUser, displayName: String? = null) {
+    private suspend fun openSession(user: FirebaseUser, displayName: String? = null, needsProfile: Boolean = false) {
         val token = user.getIdToken(false).await().token
             ?: throw SessionFailed("Firebase did not return a sign-in token.", signedOut = false)
         val rider = withContext(Dispatchers.IO) {
@@ -418,7 +419,7 @@ class AndroidAuthClient(
             } else {
                 // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
                 patchProfile(token, name, phone = null, complete = false)
-                    .copy(welcomeCredits = created.welcomeCredits)
+                    .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
             }
         }
         val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = false) }
@@ -428,6 +429,7 @@ class AndroidAuthClient(
                 account = rider,
                 busy = false,
                 error = warning,
+                needsProfile = needsProfile && !rider.profileComplete,
             )
         }
     }
@@ -550,6 +552,7 @@ private fun parseRider(body: String): RiderAccount {
         providers = rider.optJSONArray("providers").toList(),
         profileComplete = rider.optBoolean("profileComplete", false),
         welcomeCredits = root.optInt("welcomeCredits", 0),
+        balanceOffset = root.optInt("balanceOffset", 0),
     )
 }
 

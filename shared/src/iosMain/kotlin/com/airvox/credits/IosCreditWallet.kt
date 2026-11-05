@@ -12,6 +12,17 @@ fun bindUserCredits(wallet: CreditWallet, userId: String) {
     }
 }
 
+fun offsetAlreadyRemoved(userId: String, offset: Int): Boolean {
+    val stored = NSUserDefaults.standardUserDefaults.stringForKey(offsetKey(userId))
+    return stored == offset.toString()
+}
+
+fun markOffsetRemoved(userId: String, offset: Int) {
+    NSUserDefaults.standardUserDefaults.setObject(offset.toString(), offsetKey(userId))
+}
+
+private fun offsetKey(userId: String) = "airvox.offset.$userId"
+
 private fun read(raw: String?): CreditBalance {
     val parts = raw?.split(',') ?: return CreditBalance()
     if (parts.size != 3) return CreditBalance()

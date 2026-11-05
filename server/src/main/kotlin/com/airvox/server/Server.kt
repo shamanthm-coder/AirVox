@@ -79,10 +79,19 @@ fun Application.airvoxApi(
             val identity = verifier.verify(call.requireToken())
             if (call.stopIfDeleted(store, identity.uid)) return@post
             val saved = store.upsert(identity)
-            sync.riderSeen(saved.rider, call.platform())
-            val welcome = if (saved.created) readWelcomeCredits(sync) else 0
+            // Look up the portal account before copying this sign-in, or an old rider looks new.
+            val known = runCatching { sync.existingAccount(identity.uid) }.getOrNull()
+            val welcome = welcomeCreditsFor(store, sync, identity.uid, known)
             if (welcome > 0) sync.recordCredits(saved.rider, "grant", welcome)
-            call.respond(RiderResponse(saved.rider, welcomeCredits = welcome))
+            val rider = if (known == true) store.acceptReturningRider(identity.uid) ?: saved.rider else saved.rider
+            sync.riderSeen(rider, call.platform())
+            call.respond(
+                RiderResponse(
+                    rider,
+                    welcomeCredits = welcome,
+                    balanceOffset = store.balanceOffset(identity.uid),
+                ),
+            )
         }
         // The app calls this every couple of minutes while it is open.
         post("/v1/heartbeat") {
@@ -98,7 +107,9 @@ fun Application.airvoxApi(
                 val body = runCatching { call.receive<HeartbeatBody>() }.getOrNull()
                 val credits = body?.credits ?: -1
                 sync.riderSeen(rider, call.platform())
-                if (credits in 0..1_000_000) sync.setWallet(rider, credits)
+                if (credits in 0..1_000_000) {
+                    sync.setWallet(rider, store.walletToStore(identity.uid, credits, body?.clearOffset == true))
+                }
                 val room = normalizeRoom(body?.room)
                 val mode = normalizeMode(body?.mode)
                 if (room != null && mode != null) {
@@ -272,6 +283,27 @@ private suspend fun ApplicationCall.stopIfDeleted(store: RiderStore, uid: String
 
 private fun readWelcomeCredits(sync: RiderSync): Int {
     return runCatching { sync.welcomeCredits() }.getOrDefault(20).coerceIn(0, 10_000)
+}
+
+/**
+ * 20 only when this Firebase account has never been stored.
+ * An old account stays at 0 even if the local rider file was recreated.
+ * A failed lookup grants nothing and is tried again on the next sign-in.
+ */
+private fun welcomeCreditsFor(store: RiderStore, sync: RiderSync, uid: String, known: Boolean?): Int {
+    if (store.welcomeGranted(uid)) return 0
+    return when (known) {
+        true -> {
+            store.markWelcomeGranted(uid)
+            0
+        }
+        false -> {
+            val amount = readWelcomeCredits(sync)
+            store.markWelcomeGranted(uid)
+            amount
+        }
+        null -> 0
+    }
 }
 
 private fun normalizeRoom(value: String?): String? {

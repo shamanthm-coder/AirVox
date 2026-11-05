@@ -22,8 +22,12 @@ val iosConfigDir = layout.buildDirectory.dir("generated/iosConfig/kotlin")
 val writeIosConfig by tasks.registering {
     val key = iosFirebaseApiKey
     val url = iosApiUrl
+    val supabaseUrl = localProperties.getProperty("supabase.url")?.trim().orEmpty()
+    val supabaseAnonKey = localProperties.getProperty("supabase.anon.key")?.trim().orEmpty()
     inputs.property("key", key)
     inputs.property("url", url)
+    inputs.property("supabaseUrl", supabaseUrl)
+    inputs.property("supabaseAnonKey", supabaseAnonKey)
     outputs.dir(iosConfigDir)
     doLast {
         fun quoted(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
@@ -35,6 +39,8 @@ val writeIosConfig by tasks.registering {
                 "internal object IosConfig {\n" +
                 "    const val FIREBASE_API_KEY = ${quoted(key)}\n" +
                 "    const val AIRVOX_API_URL = ${quoted(url)}\n" +
+                "    const val SUPABASE_URL = ${quoted(supabaseUrl)}\n" +
+                "    const val SUPABASE_ANON_KEY = ${quoted(supabaseAnonKey)}\n" +
                 "}\n",
         )
     }

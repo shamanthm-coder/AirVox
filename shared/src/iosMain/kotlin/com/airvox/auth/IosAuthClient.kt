@@ -11,12 +11,14 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.serialization.Serializable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -56,6 +58,7 @@ class IosAuthClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val store = NSUserDefaults.standardUserDefaults
     private val channelQueue = ArrayDeque<ChannelEvent>()
+    private val channelFlush = Mutex()
     private var tokens: Tokens? = loadTokens()
     private val _state = mutableStateOf(AuthState(phase = AuthPhase.Restoring))
     override val state: State<AuthState> = _state
@@ -126,7 +129,7 @@ class IosAuthClient(
             update { it.copy(busy = true, error = null) }
             runAuth {
                 val rider = patchProfile(idToken(), trimmed, phone, complete = true)
-                update { it.copy(account = rider, busy = false, error = null) }
+                update { it.copy(account = rider, busy = false, error = null, needsProfile = false) }
             }
         }
     }
@@ -181,18 +184,19 @@ class IosAuthClient(
         val channel = normalizeChannel(room, mode) ?: return
         if (action != "join" && action != "leave") return
         channelQueue.add(ChannelEvent(channel.first, channel.second, action, isoNow()))
-        while (channelQueue.size > 40) channelQueue.removeFirst()
+        while (channelQueue.size > 40) channelQueue.removeFirstOrNull()
         saveChannelQueue()
         scope.launch { flushChannels() }
     }
 
-    override fun heartbeat(credits: Int, room: String, mode: String) {
+    override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
         if (tokens == null || _state.value.account == null) return
         scope.launch {
             flushChannels()
             runCatching {
                 val body = buildJsonObject {
                     put("credits", credits)
+                    if (clearOffset) put("clearOffset", true)
                     val channel = normalizeChannel(room, mode)
                     if (channel != null) {
                         put("room", channel.first)
@@ -206,34 +210,59 @@ class IosAuthClient(
 
     private suspend fun flushChannels() {
         if (tokens == null) return
-        while (channelQueue.isNotEmpty()) {
-            val next = channelQueue.first()
-            val body = buildJsonObject {
-                put("room", next.room)
-                put("mode", next.mode)
-                put("action", next.action)
-                put("at", next.at)
+        channelFlush.withLock {
+            while (true) {
+                val next = channelQueue.removeFirstOrNull() ?: return@withLock
+                val body = buildJsonObject {
+                    put("room", next.room)
+                    put("mode", next.mode)
+                    put("action", next.action)
+                    put("at", next.at)
+                }
+                val reply = runCatching { send("POST", "$baseUrl/v1/channels", idToken(), body.toString()) }.getOrNull()
+                val status = reply?.status ?: 0
+                if (status == 0 || status >= 500) {
+                    channelQueue.addFirst(next)
+                    saveChannelQueue()
+                    return@withLock
+                }
+                saveChannelQueue()
             }
-            val reply = runCatching { send("POST", "$baseUrl/v1/channels", idToken(), body.toString()) }.getOrNull()
-            val status = reply?.status ?: 0
-            if (status == 0 || status >= 500) return
-            channelQueue.removeFirst()
-            saveChannelQueue()
         }
     }
 
     private fun loadChannelQueue() {
         val raw = store.stringForKey(KEY_CHANNELS) ?: return
-        val loaded = runCatching { json.decodeFromString<List<ChannelEvent>>(raw) }.getOrDefault(emptyList())
+        val loaded = runCatching {
+            json.parseToJsonElement(raw).jsonArray.map { item ->
+                val event = item.jsonObject
+                ChannelEvent(
+                    room = event.string("room").orEmpty(),
+                    mode = event.string("mode").orEmpty(),
+                    action = event.string("action").orEmpty(),
+                    at = event.string("at").orEmpty(),
+                )
+            }
+        }.getOrDefault(emptyList())
         channelQueue.addAll(loaded)
     }
 
     private fun saveChannelQueue() {
         if (channelQueue.isEmpty()) {
             store.removeObjectForKey(KEY_CHANNELS)
-        } else {
-            store.setObject(json.encodeToString(channelQueue.toList()), KEY_CHANNELS)
+            return
         }
+        val saved = buildJsonArray {
+            channelQueue.forEach { event ->
+                add(buildJsonObject {
+                    put("room", event.room)
+                    put("mode", event.mode)
+                    put("action", event.action)
+                    put("at", event.at)
+                })
+            }
+        }
+        store.setObject(saved.toString(), KEY_CHANNELS)
     }
 
     private fun isoNow(): String = NSISO8601DateFormatter().stringFromDate(NSDate())
@@ -303,12 +332,12 @@ class IosAuthClient(
                     }
                     runCatching { firebase("https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode", verify.toString()) }
                 }
-                openSession(trimmedName)
+                openSession(trimmedName, needsProfile = create)
             }
         }
     }
 
-    private suspend fun openSession(displayName: String? = null) {
+    private suspend fun openSession(displayName: String? = null, needsProfile: Boolean = false) {
         val created = exchange(send("POST", "$baseUrl/v1/session", idToken(), body = "{}"))
         val name = displayName?.trim()?.takeIf { validName(it) }
         val rider = if (name == null) {
@@ -316,9 +345,17 @@ class IosAuthClient(
         } else {
             // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
             patchProfile(idToken(), name, phone = null, complete = false)
-                .copy(welcomeCredits = created.welcomeCredits)
+                .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
         }
-        update { it.copy(phase = AuthPhase.Ready, account = rider, busy = false, error = null) }
+        update {
+            it.copy(
+                phase = AuthPhase.Ready,
+                account = rider,
+                busy = false,
+                error = null,
+                needsProfile = needsProfile && !rider.profileComplete,
+            )
+        }
     }
 
     /** A Firebase ID token that is good for at least another minute. */
@@ -376,7 +413,10 @@ class IosAuthClient(
             throw SessionFailed(message, signedOut = reply.status == 401 || reply.status == 410)
         }
         val rider = parseRider(parsed["rider"]!!.jsonObject)
-        return rider.copy(welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0)
+        return rider.copy(
+            welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
+            balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
+        )
     }
 
     private suspend fun runAuth(block: suspend () -> Unit) {
@@ -432,7 +472,6 @@ class IosAuthClient(
 
     private class SessionFailed(message: String, val signedOut: Boolean) : Exception(message)
 
-    @Serializable
     private data class ChannelEvent(val room: String, val mode: String, val action: String, val at: String)
 
     private data class Tokens(val idToken: String, val refreshToken: String, val expiresAt: Long)

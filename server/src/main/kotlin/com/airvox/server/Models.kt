@@ -20,6 +20,11 @@ data class RiderResponse(
     val rider: Rider,
     /** 20 the first time this account signs in, otherwise 0. */
     val welcomeCredits: Int = 0,
+    /**
+     * Credits to take back off the phone. Set when a welcome grant was given again
+     * to an account that already had one. Stays until the phone confirms it.
+     */
+    val balanceOffset: Int = 0,
 )
 
 /** Result of saving a rider. [created] is true only on that account's first sign-in. */
@@ -47,6 +52,8 @@ data class HeartbeatBody(
     val credits: Int = -1,
     val room: String = "",
     val mode: String = "",
+    /** The phone has already removed [RiderResponse.balanceOffset] from its wallet. */
+    val clearOffset: Boolean = false,
 )
 
 @Serializable
@@ -85,6 +92,10 @@ internal data class StoredRider(
     val displayName: String? = null,
     val displayNameCustom: Boolean = false,
     val profileComplete: Boolean = false,
+    /** True after the one welcome grant was decided, so a rebuilt local file cannot grant it again. */
+    val welcomeGranted: Boolean = false,
+    /** Subtracted from the balance the phone reports, until the phone confirms it removed the same amount. */
+    val balanceOffset: Int = 0,
     val signInProvider: String,
     val providers: List<String> = emptyList(),
     val createdAt: String,

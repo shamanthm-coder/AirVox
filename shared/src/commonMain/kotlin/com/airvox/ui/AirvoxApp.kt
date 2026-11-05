@@ -64,6 +64,8 @@ fun AirvoxApp(
     auth: AuthClient,
     wallet: CreditWallet = CreditWallet(),
     bindWallet: (String) -> Unit = {},
+    offsetAlreadyRemoved: (String, Int) -> Boolean = { _, _ -> false },
+    markOffsetRemoved: (String, Int) -> Unit = { _, _ -> },
 ) {
     val signedInId = auth.state.value.account?.id
     var destination by remember(signedInId) { mutableStateOf(Destination.Channel) }
@@ -114,7 +116,8 @@ fun AirvoxApp(
     }
     val signedIn = authState.account
     var walletReady by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits) {
+    var clearOffset by remember { mutableStateOf(false) }
+    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits, signedIn?.balanceOffset) {
         val account = signedIn
         if (account == null) {
             walletReady = null
@@ -122,16 +125,31 @@ fun AirvoxApp(
         }
         bindWallet(account.id)
         if (account.welcomeCredits > 0) wallet.add(account.welcomeCredits)
+        if (account.balanceOffset > 0) {
+            if (!offsetAlreadyRemoved(account.id, account.balanceOffset)) {
+                wallet.remove(account.balanceOffset)
+                markOffsetRemoved(account.id, account.balanceOffset)
+            }
+            clearOffset = true
+        }
         walletReady = account.id
     }
     val shownCredits = wallet.state.value.credits
     LaunchedEffect(signedIn?.id, shownCredits, walletReady) {
         if (signedIn?.id == null || walletReady != signedIn.id) return@LaunchedEffect
+        val drop = clearOffset
+        if (drop) clearOffset = false
         val live = session.state.value
-        val onChannel = live.connection == IntercomConnection.Connected
-        auth.heartbeat(shownCredits, if (onChannel) live.roomCode else "", if (onChannel) live.path.label else "")
+        val onChannel = live.connection == IntercomConnection.Connected ||
+            live.connection == IntercomConnection.Connecting
+        auth.heartbeat(
+            shownCredits,
+            if (onChannel) live.roomCode else "",
+            if (onChannel) live.path.label else "",
+            clearOffset = drop,
+        )
     }
-    if (auth.enforced && authState.account?.profileComplete != true) {
+    if (auth.enforced && authState.needsProfile && authState.account?.profileComplete != true) {
         ProfileScreen(auth)
         return
     }
@@ -143,7 +161,8 @@ fun AirvoxApp(
         while (true) {
             delay(HEARTBEAT_MS)
             val live = session.state.value
-            val onChannel = live.connection == IntercomConnection.Connected
+            val onChannel = live.connection == IntercomConnection.Connected ||
+                live.connection == IntercomConnection.Connecting
             auth.heartbeat(
                 wallet.state.value.credits,
                 if (onChannel) live.roomCode else "",
@@ -157,7 +176,7 @@ fun AirvoxApp(
     val livePath = session.state.value.path
     var openChannel by remember { mutableStateOf<Pair<String, String>?>(null) }
     LaunchedEffect(connection, liveRoom, livePath) {
-        if (connection == IntercomConnection.Connected && liveRoom.isNotBlank()) {
+        if ((connection == IntercomConnection.Connected || connection == IntercomConnection.Connecting) && liveRoom.isNotBlank()) {
             auth.reportChannel(liveRoom, livePath.label, "join")
             openChannel = liveRoom to livePath.label
         } else if (openChannel != null && connection != IntercomConnection.Connected && connection != IntercomConnection.Connecting) {
