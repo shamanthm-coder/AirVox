@@ -6,7 +6,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +25,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresPermission
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
@@ -32,6 +36,8 @@ import com.airvox.intercom.IntercomSession
 import com.airvox.playback.PlaybackController
 import com.airvox.vox.Vox
 import java.util.Locale
+import androidx.core.content.edit
+import androidx.core.net.toUri
 
 /**
  * Listens for "Voxy" and answers out loud with the rider's name.
@@ -51,8 +57,10 @@ class AndroidVoxy(
     override val state: State<VoxyState> = stateHolder
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioManager = appContext.getSystemService(AudioManager::class.java)
     private var displayName = ""
     private var started = false
+    private var enabled = false
     private var disposed = false
     private var inForeground = false
     private var speaking = false
@@ -61,6 +69,7 @@ class AndroidVoxy(
     private var failures = 0
     private var listeningNow = false
     private var listenQueued = false
+    private var musicWasPlaying = false
     private var recognitionUnavailable = false
     private var sessionOpen = false
     private var epoch = 0
@@ -68,6 +77,9 @@ class AndroidVoxy(
     private var backgroundEnabled = false
     private var wantBackground = false
     private var recognizer: SpeechRecognizer? = null
+    private var heldRecorder: AudioRecord? = null
+    private var heldThread: Thread? = null
+    @Volatile private var holdMic = false
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var pendingLine: String? = null
@@ -100,35 +112,50 @@ class AndroidVoxy(
 
         override fun onStop(owner: LifecycleOwner) {
             inForeground = false
-            if (backgroundEnabled) {
-                listenQueued = false
-                mainHandler.removeCallbacks(listenAgain)
-                stopRecognizer()
-                if (started && !speaking) scheduleListen(400)
-                return
-            }
+            if (backgroundEnabled) return
             mainHandler.removeCallbacks(listenAgain)
+            releaseHeldMic()
             releaseEar()
             stopRecognizer()
         }
     }
 
-    private val listenAgain = Runnable {
+    private val listenAgain = Runnable @RequiresPermission(Manifest.permission.RECORD_AUDIO) {
         listenQueued = false
-        if (disposed || !started || speaking) return@Runnable
+        if (disposed || !started || !enabled || speaking) return@Runnable
         beginListen()
     }
 
+    private val keepMusicOn = object : Runnable {
+        @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+        override fun run() {
+            if (disposed || !started || !enabled || speaking) return
+            if (!channelHasMic()) {
+                ensureMicHeld()
+                val manager = audioManager
+                if (manager != null && manager.mode == AudioManager.MODE_IN_COMMUNICATION) {
+                    manager.mode = AudioManager.MODE_NORMAL
+                }
+                playback.refresh()
+                val now = playback.nowPlaying.value
+                if (now.hasSession && !now.paused) musicWasPlaying = true
+                if (musicWasPlaying) playback.keepPlaying()
+            }
+            mainHandler.postDelayed(this, 200)
+        }
+    }
+
     private val watch = object : Runnable {
+        @RequiresPermission(Manifest.permission.RECORD_AUDIO)
         override fun run() {
             if (disposed) return
+            if (started && enabled && hasMic() && (inForeground || backgroundEnabled)) ensureMicHeld()
             if (started && channelHasMic()) {
-                if (listeningNow || listenQueued || stateHolder.value.listening) {
+                if (listeningNow || listenQueued) {
                     listenQueued = false
                     mainHandler.removeCallbacks(listenAgain)
-                    releaseEar()
-                    stopRecognizer()
-                    publish(false, "Voxy will listen again when the channel is quiet.")
+                    pauseRecognizer()
+                    publish(true, "Voxy will listen again when the channel is quiet.")
                 }
             } else if (canListen() && !listeningNow && !listenQueued) {
                 scheduleListen(250)
@@ -152,6 +179,23 @@ class AndroidVoxy(
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onEndOfSpeech() = Unit
+
+        override fun onSegmentResults(segmentResults: Bundle) {
+            val texts = textsFrom(segmentResults)
+            mainHandler.post {
+                if (token != epoch || !sessionOpen || speaking) return@post
+                if (texts.any(::heardVoxy)) greet()
+            }
+        }
+
+        override fun onEndOfSegmentedSession() {
+            mainHandler.post {
+                if (token != epoch || speaking) return@post
+                sessionOpen = false
+                listeningNow = false
+                scheduleListen(80)
+            }
+        }
 
         override fun onError(error: Int) {
             mainHandler.post {
@@ -223,6 +267,7 @@ class AndroidVoxy(
         }
     }
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override fun start(displayName: String) {
         if (disposed) return
         this.displayName = displayName.trim()
@@ -230,10 +275,44 @@ class AndroidVoxy(
             started = true
             publish(false, "Say Voxy.")
         }
+        if (!enabled) {
+            publish(false, "Voxy is off.")
+            return
+        }
         if (prefs.getBoolean(PREF_BACKGROUND, false) && !needsNotificationPermission()) {
             if (backgroundEnabled) startListenService() else turnBackgroundOn(askBattery = false)
         }
-        if (!speaking) scheduleListen(150)
+        if (!speaking) {
+            playback.refresh()
+            val now = playback.nowPlaying.value
+            if (now.hasSession && !now.paused) musicWasPlaying = true
+            ensureMicHeld()
+            publish(true, LISTENING_LINE)
+            mainHandler.removeCallbacks(keepMusicOn)
+            mainHandler.post(keepMusicOn)
+            scheduleListen(150)
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    override fun setEnabled(enabled: Boolean) {
+        if (disposed || this.enabled == enabled) return
+        this.enabled = enabled
+        if (!enabled) {
+            shutListening()
+            publish(false, "Voxy is off.")
+            return
+        }
+        if (!started) return
+        if (backgroundEnabled) startListenService()
+        playback.refresh()
+        val now = playback.nowPlaying.value
+        if (now.hasSession && !now.paused) musicWasPlaying = true
+        ensureMicHeld()
+        publish(true, LISTENING_LINE)
+        mainHandler.removeCallbacks(keepMusicOn)
+        mainHandler.post(keepMusicOn)
+        scheduleListen(150)
     }
 
     override fun setBackground(enabled: Boolean) {
@@ -241,12 +320,13 @@ class AndroidVoxy(
         if (!enabled) {
             wantBackground = false
             backgroundEnabled = false
-            prefs.edit().putBoolean(PREF_BACKGROUND, false).apply()
+            prefs.edit { putBoolean(PREF_BACKGROUND, false) }
             stopListenService()
             publish(stateHolder.value.listening && inForeground, stateHolder.value.line)
             if (!inForeground) {
-                stopRecognizer()
+                releaseHeldMic()
                 releaseEar()
+                stopRecognizer()
                 publish(false, "Say Voxy.")
             }
             return
@@ -266,10 +346,13 @@ class AndroidVoxy(
         listenQueued = false
         pendingLine = null
         mainHandler.removeCallbacks(listenAgain)
+        mainHandler.removeCallbacks(keepMusicOn)
+        releaseHeldMic()
         releaseEar()
         stopRecognizer()
         tts?.stop()
         stopListenService()
+        musicWasPlaying = false
         if (pausedMusic) {
             playback.resumeAfterVoice()
             pausedMusic = false
@@ -290,10 +373,10 @@ class AndroidVoxy(
         ttsReady = false
     }
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun beginListen() {
         if (!canListen()) return
         if (!hasMic()) {
-            releaseEar()
             if (!askedMic) {
                 askedMic = true
                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -301,6 +384,7 @@ class AndroidVoxy(
             publish(false, MIC_LINE)
             return
         }
+        ensureMicHeld()
         startPhoneSession()
     }
 
@@ -324,13 +408,6 @@ class AndroidVoxy(
             listeningNow = true
             sessionOpen = true
             publish(true, promptLine())
-            val token = epoch
-            mainHandler.postDelayed({
-                if (token == epoch && sessionOpen && !speaking) {
-                    Log.i(TAG, "listen timed out")
-                    handleError(SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
-                }
-            }, 12_000L)
         } catch (_: SecurityException) {
             listeningNow = false
             sessionOpen = false
@@ -341,16 +418,15 @@ class AndroidVoxy(
 
     private fun handleTranscripts(texts: List<String>) {
         if (disposed || !started || speaking || !sessionOpen) return
-        sessionOpen = false
-        listeningNow = false
         Log.i(TAG, "heard ${texts.joinToString()}")
-        retireRecognizer()
         if (texts.any(::heardVoxy)) {
             greet()
-        } else {
-            if (texts.isNotEmpty()) publish(false, "Heard \"${texts.first()}\". Say Voxy.")
-            scheduleListen(if (texts.isEmpty()) 200L else 1_200L)
+            return
         }
+        sessionOpen = false
+        listeningNow = false
+        if (texts.isNotEmpty()) publish(true, "Heard \"${texts.first()}\". Say Voxy.")
+        scheduleListen(80)
     }
 
     private fun handleError(error: Int) {
@@ -358,7 +434,6 @@ class AndroidVoxy(
         sessionOpen = false
         listeningNow = false
         Log.i(TAG, "listen error $error")
-        retireRecognizer()
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             releaseEar()
             publish(false, MIC_LINE)
@@ -376,25 +451,31 @@ class AndroidVoxy(
         val routine = error == SpeechRecognizer.ERROR_NO_MATCH ||
             error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
         if (!routine) failures += 1
-        val delay = when (error) {
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 700L
-            SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER -> 900L
-            else -> 300L
-        }
         if (!routine && failures >= 3) {
+            retireRecognizer()
             publish(false, "Voxy can't use speech recognition on this phone right now. Say Voxy again.")
+        }
+        val delay = when {
+            routine -> 80L
+            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 700L
+            error == SpeechRecognizer.ERROR_NETWORK ||
+                error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT ||
+                error == SpeechRecognizer.ERROR_SERVER -> 900L
+            else -> 300L
         }
         scheduleListen(delay + (failures.coerceAtMost(4) * 200L))
     }
 
     private fun greet() {
-        if (speaking || disposed || !started) return
+        if (speaking || disposed || !started || !enabled) return
         speaking = true
         failures = 0
         listenQueued = false
         sessionOpen = false
+        musicWasPlaying = false
         mainHandler.removeCallbacks(listenAgain)
-        stopRecognizer()
+        mainHandler.removeCallbacks(keepMusicOn)
+        pauseRecognizer()
         val line = voxyGreeting(displayName)
         publish(false, line)
         mainHandler.postDelayed({ finishSpeaking() }, 8_000L)
@@ -420,13 +501,39 @@ class AndroidVoxy(
         if (!speaking) return
         speaking = false
         val holdForChannel = channelHasMic()
-        if (pausedMusic && !holdForChannel) playback.resumeAfterVoice()
+        val resumeMusic = pausedMusic && !holdForChannel
+        if (resumeMusic) {
+            playback.resumeAfterVoice()
+            musicWasPlaying = true
+        }
         pausedMusic = false
-        if (started && !disposed) scheduleListen(600)
+        if (started && enabled && !disposed) {
+            mainHandler.removeCallbacks(keepMusicOn)
+            mainHandler.post(keepMusicOn)
+            scheduleListen(600)
+        }
+    }
+
+    private fun shutListening() {
+        listenQueued = false
+        speaking = false
+        pendingLine = null
+        mainHandler.removeCallbacks(listenAgain)
+        mainHandler.removeCallbacks(keepMusicOn)
+        tts?.stop()
+        stopListenService()
+        pauseRecognizer()
+        releaseHeldMic()
+        releaseEar()
+        if (pausedMusic) {
+            playback.resumeAfterVoice()
+            pausedMusic = false
+        }
+        musicWasPlaying = false
     }
 
     private fun canListen(): Boolean {
-        return started && !disposed && (inForeground || backgroundEnabled) &&
+        return enabled && started && !disposed && (inForeground || backgroundEnabled) &&
             !speaking && !channelHasMic() && !recognitionUnavailable
     }
 
@@ -444,10 +551,9 @@ class AndroidVoxy(
         if (!canListen()) {
             listenQueued = false
             mainHandler.removeCallbacks(listenAgain)
-            if (channelHasMic() && (listeningNow || stateHolder.value.listening)) {
-                releaseEar()
-                stopRecognizer()
-                publish(false, "Voxy will listen again when the channel is quiet.")
+            if (channelHasMic() && (listeningNow || listenQueued)) {
+                pauseRecognizer()
+                publish(true, "Voxy will listen again when the channel is quiet.")
             }
             return
         }
@@ -465,9 +571,14 @@ class AndroidVoxy(
         return created
     }
 
-    private fun stopRecognizer() {
+    private fun pauseRecognizer() {
         listeningNow = false
         sessionOpen = false
+        runCatching { recognizer?.cancel() }
+    }
+
+    private fun stopRecognizer() {
+        pauseRecognizer()
         retireRecognizer()
     }
 
@@ -491,6 +602,80 @@ class AndroidVoxy(
         vox.setEarPaused(false)
     }
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun ensureMicHeld() {
+        if (!hasMic()) return
+        vox.setEarPaused(true)
+        if (holdMic && heldThread?.isAlive == true) return
+        releaseHeldMic()
+        val recorder = openHeldMic() ?: return
+        holdMic = true
+        heldRecorder = recorder
+        try {
+            recorder.startRecording()
+        } catch (_: IllegalStateException) {
+            holdMic = false
+            heldRecorder = null
+            runCatching { recorder.release() }
+            return
+        }
+        val frame = 16000 / 25
+        heldThread = Thread({
+            val pcm = ShortArray(frame)
+            while (holdMic) {
+                val read = try {
+                    recorder.read(pcm, 0, pcm.size)
+                } catch (_: IllegalStateException) {
+                    -1
+                }
+                if (!holdMic) break
+                if (read < 0) {
+                    try {
+                        Thread.sleep(40)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+        }, "VoxyMic").also { it.start() }
+    }
+
+    private fun releaseHeldMic() {
+        holdMic = false
+        val thread = heldThread
+        val recorder = heldRecorder
+        heldThread = null
+        heldRecorder = null
+        if (recorder != null) {
+            runCatching {
+                if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) recorder.stop()
+            }
+        }
+        thread?.join(250)
+        recorder?.let { runCatching { it.release() } }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun openHeldMic(): AudioRecord? {
+        val rate = 16000
+        val min = AudioRecord.getMinBufferSize(
+            rate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (min <= 0) return null
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            rate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            min * 2,
+        )
+        if (recorder.state == AudioRecord.STATE_INITIALIZED) return recorder
+        recorder.release()
+        return null
+    }
+
     private fun listenIntent(): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
@@ -503,9 +688,11 @@ class AndroidVoxy(
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language)
             }
             putStringArrayListExtra(BIASING_STRINGS, arrayListOf("Voxy", "hey Voxy"))
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 300L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 700L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 500L)
+            putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, true)
+            putExtra("android.speech.extra.DICTATION_MODE", true)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 60_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 60_000L)
         }
     }
 
@@ -528,7 +715,7 @@ class AndroidVoxy(
 
     private fun turnBackgroundOn(askBattery: Boolean) {
         backgroundEnabled = true
-        prefs.edit().putBoolean(PREF_BACKGROUND, true).apply()
+        prefs.edit { putBoolean(PREF_BACKGROUND, true) }
         startListenService()
         publish(stateHolder.value.listening, stateHolder.value.line.ifBlank { "Listening. Say Voxy." })
         if (!speaking) scheduleListen(200)
@@ -541,7 +728,7 @@ class AndroidVoxy(
             .onFailure { error ->
                 Log.w(TAG, "Could not keep Voxy listening in the background", error)
                 backgroundEnabled = false
-                prefs.edit().putBoolean(PREF_BACKGROUND, false).apply()
+                prefs.edit { putBoolean(PREF_BACKGROUND, false) }
                 publish(stateHolder.value.listening, "Voxy could not stay on while the phone is locked.")
             }
     }
@@ -555,7 +742,7 @@ class AndroidVoxy(
         val power = appContext.getSystemService(PowerManager::class.java) ?: return
         if (power.isIgnoringBatteryOptimizations(appContext.packageName)) return
         val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-            data = Uri.parse("package:${appContext.packageName}")
+            data = "package:${appContext.packageName}".toUri()
         }
         runCatching { activity.startActivity(intent) }
     }

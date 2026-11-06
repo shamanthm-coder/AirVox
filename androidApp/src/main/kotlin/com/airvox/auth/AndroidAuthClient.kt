@@ -34,10 +34,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.content.edit
+import kotlin.time.Duration.Companion.milliseconds
 
 class AndroidAuthClient(
     private val activity: ComponentActivity,
-    private val apiUrl: String,
+    apiUrl: String,
     private val webClientId: String,
 ) : AuthClient {
     override val enforced: Boolean = true
@@ -57,6 +59,8 @@ class AndroidAuthClient(
     private val channelQueue = ArrayDeque<JSONObject>()
     private val _state = mutableStateOf(AuthState(phase = AuthPhase.Restoring))
     override val state: State<AuthState> = _state
+    /** False while this phone is opening its own session, so that check-in cannot sign it out. */
+    private var noticeOtherSignIn = false
     private val googleSignIn by lazy {
         GoogleSignIn.getClient(
             activity,
@@ -292,27 +296,46 @@ class AndroidAuthClient(
 
     override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
         val user = firebase?.currentUser ?: return
-        if (_state.value.account == null) return
+        if (_state.value.account == null || _state.value.signedInElsewhere) return
         scope.launch {
             flushChannels()
-            runCatching {
-                val token = user.getIdToken(false).await().token ?: return@launch
+            val rejected = runCatching {
+                val token = user.getIdToken(false).await().token ?: return@runCatching null
                 withContext(Dispatchers.IO) {
-                    val body = JSONObject().put("credits", credits)
-                    if (clearOffset) body.put("clearOffset", true)
-                    val channel = normalizeChannel(room, mode)
-                    if (channel != null) {
-                        body.put("room", channel.first).put("mode", channel.second)
-                    }
-                    val request = Request.Builder()
-                        .url("$baseUrl/v1/heartbeat")
-                        .header("Authorization", "Bearer $token")
-                        .header(PLATFORM_HEADER, PLATFORM)
-                        .post(body.toString().toRequestBody(jsonType))
-                        .build()
-                    http.newCall(request).execute().close()
+                    rejectedSession(token, credits, room, mode, clearOffset)
                 }
+            }.getOrNull()
+            if (rejected != null && noticeOtherSignIn && readSession() == rejected && _state.value.account != null) {
+                update { it.copy(signedInElsewhere = true) }
             }
+        }
+    }
+
+    /** The session id this phone sent, when the server says a newer phone signed in. */
+    private fun rejectedSession(token: String, credits: Int, room: String, mode: String, clearOffset: Boolean): String? {
+        val sent = readSession()
+        if (sent.isEmpty()) return null
+        val body = JSONObject().put("credits", credits)
+        if (clearOffset) body.put("clearOffset", true)
+        val channel = normalizeChannel(room, mode)
+        if (channel != null) {
+            body.put("room", channel.first).put("mode", channel.second)
+        }
+        val request = Request.Builder()
+            .url("$baseUrl/v1/heartbeat")
+            .header("Authorization", "Bearer $token")
+            .header(PLATFORM_HEADER, PLATFORM)
+            .header(SESSION_HEADER, sent)
+            .post(body.toString().toRequestBody(jsonType))
+            .build()
+        return try {
+            http.newCall(request).execute().use { response ->
+                if (response.code != 409) return null
+                val text = response.body?.string().orEmpty()
+                if ("signed_in_elsewhere" in text && readSession() == sent) sent else null
+            }
+        } catch (_: IOException) {
+            null
         }
     }
 
@@ -347,7 +370,7 @@ class AndroidAuthClient(
     private fun saveChannelQueue() {
         val array = JSONArray()
         channelQueue.forEach { array.put(it) }
-        channelPrefs.edit().putString("queue", array.toString()).apply()
+        channelPrefs.edit { putString("queue", array.toString()) }
     }
 
     override fun signOut() {
@@ -362,8 +385,21 @@ class AndroidAuthClient(
             }
             firebase?.signOut()
             clearAccount()
+            clearSession()
             val remaining = 700L - (System.currentTimeMillis() - started)
-            if (remaining > 0) delay(remaining)
+            if (remaining > 0) delay(remaining.milliseconds)
+            update { AuthState(phase = AuthPhase.Ready, configured = configured) }
+        }
+    }
+
+    override fun confirmOtherDevice() {
+        if (!_state.value.signedInElsewhere) return
+        noticeOtherSignIn = false
+        scope.launch {
+            val configured = firebase != null
+            runCatching { firebase?.signOut() }
+            clearAccount()
+            clearSession()
             update { AuthState(phase = AuthPhase.Ready, configured = configured) }
         }
     }
@@ -418,12 +454,14 @@ class AndroidAuthClient(
     }
 
     private suspend fun openSession(user: FirebaseUser, displayName: String? = null, needsProfile: Boolean = false) {
+        noticeOtherSignIn = false
         try {
             val token = user.getIdToken(false).await().token
             if (token == null) {
                 if (!enterOffline(user, displayName, needsProfile)) {
                     throw SessionFailed("Firebase did not return a sign-in token.", signedOut = false)
                 }
+                noticeOtherSignIn = true
                 return
             }
             val rider = withContext(Dispatchers.IO) {
@@ -446,13 +484,16 @@ class AndroidAuthClient(
                     busy = false,
                     error = warning,
                     needsProfile = needsProfile && !rider.profileComplete,
+                    signedInElsewhere = false,
                 )
             }
+            noticeOtherSignIn = true
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             // Firebase keeps the user on the phone. A dead network must not dump them back on sign-in.
             if (!canStayOffline(error) || !enterOffline(user, displayName, needsProfile)) throw error
+            noticeOtherSignIn = true
         }
     }
 
@@ -466,6 +507,7 @@ class AndroidAuthClient(
                 busy = false,
                 error = null,
                 needsProfile = needsProfile && !account.profileComplete,
+                signedInElsewhere = false,
             )
         }
         return true
@@ -520,7 +562,7 @@ class AndroidAuthClient(
         json.putNullable("phoneNumber", rider.phoneNumber)
         json.putNullable("email", rider.email)
         json.putNullable("displayName", rider.displayName)
-        accountPrefs.edit().putString(KEY_RIDER, json.toString()).apply()
+        accountPrefs.edit { putString(KEY_RIDER, json.toString()) }
     }
 
     private fun readAccount(): RiderAccount? {
@@ -542,7 +584,18 @@ class AndroidAuthClient(
     }
 
     private fun clearAccount() {
-        accountPrefs.edit().remove(KEY_RIDER).apply()
+        accountPrefs.edit { remove(KEY_RIDER) }
+    }
+
+    private fun readSession(): String = accountPrefs.getString(KEY_SESSION, "").orEmpty()
+
+    private fun saveSession(id: String) {
+        if (id.isBlank()) return
+        accountPrefs.edit { putString(KEY_SESSION, id) }
+    }
+
+    private fun clearSession() {
+        accountPrefs.edit { remove(KEY_SESSION) }
     }
 
     private fun JSONObject.putNullable(key: String, value: String?) {
@@ -555,7 +608,7 @@ class AndroidAuthClient(
             null
         } catch (error: SupabaseRejected) {
             error.message ?: "Supabase couldn't save this account."
-        } catch (error: IOException) {
+        } catch (_: IOException) {
             "Can't reach Supabase to save this account."
         }
     }
@@ -624,11 +677,14 @@ class AndroidAuthClient(
                     val message = parseError(body, "Airvox couldn't open your session (${response.code}).")
                     throw SessionFailed(message, signedOut = response.code == 401 || response.code == 410)
                 }
-                return parseRider(body)
+                val account = parseRider(body)
+                val session = runCatching { JSONObject(body).optString("sessionId") }.getOrNull().orEmpty()
+                if (session.isNotBlank()) saveSession(session)
+                return account
             }
         } catch (error: SessionFailed) {
             throw error
-        } catch (error: IOException) {
+        } catch (_: IOException) {
             throw SessionFailed(
                 "Can't reach the Airvox server at $baseUrl. From the Airvana folder run gradlew :server:run. On a phone, set airvox.api.url to this computer's address.",
                 signedOut = false,
@@ -650,7 +706,9 @@ class AndroidAuthClient(
 // Lets the Airvox API record which app the rider uses, for the admin portal.
 private const val PLATFORM_HEADER = "X-Airvox-Platform"
 private const val PLATFORM = "Android"
+private const val SESSION_HEADER = "X-Airvox-Session"
 private const val KEY_RIDER = "rider"
+private const val KEY_SESSION = "session"
 
 private fun validEmail(value: String): Boolean {
     val at = value.indexOf('@')

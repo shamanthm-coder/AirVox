@@ -32,6 +32,8 @@ data class AuthState(
     val pendingSession: Boolean = false,
     /** True only while a new account still needs a name and mobile. Sign-in leaves this false. */
     val needsProfile: Boolean = false,
+    /** This phone's sign-in was replaced. The account stays until the rider taps OK. */
+    val signedInElsewhere: Boolean = false,
 )
 
 /**
@@ -73,6 +75,9 @@ interface AuthClient {
     fun loadPlans(onResult: (List<CreditPlan>) -> Unit) = onResult(emptyList())
 
     fun signOut()
+
+    /** Leaves this phone only. Does not end the session on the phone that just signed in. */
+    fun confirmOtherDevice() = Unit
 
     fun clearError()
 }

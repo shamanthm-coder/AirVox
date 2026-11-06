@@ -25,10 +25,12 @@ data class RiderResponse(
      * to an account that already had one. Stays until the phone confirms it.
      */
     val balanceOffset: Int = 0,
+    /** This sign-in. An older phone still holding the previous id is signed out. */
+    val sessionId: String = "",
 )
 
 /** Result of saving a rider. [created] is true only on that account's first sign-in. */
-data class UpsertedRider(val rider: Rider, val created: Boolean)
+data class UpsertedRider(val rider: Rider, val created: Boolean, val sessionId: String = "")
 
 /** A rider removed from the portal. [firebaseUid] is the phone sign-in, when there is one. */
 data class RemovedRider(val id: String, val firebaseUid: String?)
@@ -98,6 +100,8 @@ internal data class StoredRider(
     val balanceOffset: Int = 0,
     val signInProvider: String,
     val providers: List<String> = emptyList(),
+    /** The phone that last called POST /v1/session. Empty until the first sign-in after this was added. */
+    val sessionId: String = "",
     val createdAt: String,
     val lastSeenAt: String,
 ) {

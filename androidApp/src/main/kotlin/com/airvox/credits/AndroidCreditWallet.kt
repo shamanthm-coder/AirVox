@@ -2,6 +2,7 @@ package com.airvox.credits
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.content.edit
 
 private const val LEGACY_PREFS = "airvox_credits"
 
@@ -20,9 +21,9 @@ fun offsetAlreadyRemoved(context: Context, userId: String, offset: Int): Boolean
 
 fun markOffsetRemoved(context: Context, userId: String, offset: Int) {
     context.getSharedPreferences("airvox_credits_$userId", Context.MODE_PRIVATE)
-        .edit()
-        .putInt("offset_removed", offset)
-        .apply()
+        .edit {
+            putInt("offset_removed", offset)
+        }
 }
 
 private fun claimLegacy(context: Context, userId: String): CreditBalance? {
@@ -30,7 +31,7 @@ private fun claimLegacy(context: Context, userId: String): CreditBalance? {
     if (!legacy.contains("credits")) return null
     val owner = legacy.getString("owner", null)
     if (owner != null && owner != userId) return null
-    legacy.edit().putString("owner", userId).apply()
+    legacy.edit { putString("owner", userId) }
     return read(legacy)
 }
 
@@ -41,9 +42,9 @@ private fun read(prefs: SharedPreferences): CreditBalance = CreditBalance(
 )
 
 private fun write(prefs: SharedPreferences, balance: CreditBalance) {
-    prefs.edit()
-        .putInt("credits", balance.credits)
-        .putInt("spent", balance.spent)
-        .putInt("minutes", balance.minutesUsed)
-        .apply()
+    prefs.edit {
+        putInt("credits", balance.credits)
+            .putInt("spent", balance.spent)
+            .putInt("minutes", balance.minutesUsed)
+    }
 }

@@ -64,10 +64,19 @@ fun SettingsScreen(auth: AuthClient) {
             AirvoxCard {
                 Text("Signed in", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
+                val phone = account.phoneNumber?.takeIf { it.isNotBlank() }
+                val gmail = account.email?.takeIf { it.isNotBlank() }
                 Text(
-                    text = account.phoneNumber ?: account.email ?: "Rider",
+                    text = phone ?: gmail ?: "Rider",
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                if (phone != null && gmail != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = gmail,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
                 Text(
                     text = providerLabel(account.signInProvider),
                     color = AirvoxPalette.Dim,

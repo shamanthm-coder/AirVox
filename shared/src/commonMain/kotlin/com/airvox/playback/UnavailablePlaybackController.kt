@@ -21,4 +21,6 @@ class UnavailablePlaybackController : PlaybackController {
     override fun pauseForVoice() = Unit
 
     override fun resumeAfterVoice() = Unit
+
+    override fun keepPlaying() = Unit
 }

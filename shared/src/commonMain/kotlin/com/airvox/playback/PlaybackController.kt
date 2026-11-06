@@ -35,4 +35,7 @@ interface PlaybackController {
 
     /** Resumes only when Airvox paused a song that was already playing. */
     fun resumeAfterVoice()
+
+    /** Starts the player again when another app paused a song that was already playing. */
+    fun keepPlaying()
 }

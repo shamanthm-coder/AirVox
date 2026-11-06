@@ -55,6 +55,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.airvox.bluetooth.BluetoothEarphoneScanner
@@ -182,7 +183,11 @@ fun ChannelScreen(
         AirvoxCard {
             VoxRow(
                 enabled = voxState.enabled,
-                onToggle = { vox.setEnabled(!voxState.enabled) },
+                onToggle = {
+                    val turnOn = !voxState.enabled
+                    vox.setEnabled(turnOn)
+                    voxy.setEnabled(turnOn)
+                },
             )
             Spacer(Modifier.height(14.dp))
             PathPicker(
@@ -229,7 +234,7 @@ fun ChannelScreen(
                 enabled = !inRoom,
                 placeholder = "Room code",
                 imeAction = ImeAction.Next,
-                onDone = { vox.connect(roomCode, shownPath, password) },
+                onDone = {},
             )
             Spacer(Modifier.height(10.dp))
             ChannelField(
@@ -241,10 +246,11 @@ fun ChannelScreen(
                 enabled = !inRoom,
                 placeholder = "Password",
                 imeAction = ImeAction.Done,
-                onDone = { vox.connect(roomCode, shownPath, password) },
+                onDone = {},
                 password = true,
             )
             Spacer(Modifier.height(10.dp))
+            val actionColor = if (inRoom) LeaveRed else JoinGreen
             OutlinedButton(
                 onClick = {
                     when {
@@ -261,9 +267,14 @@ fun ChannelScreen(
                     .fillMaxWidth()
                     .height(48.dp),
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, AirvoxPalette.Line),
+                border = BorderStroke(
+                    1.dp,
+                    if (intercom.connection == IntercomConnection.Unavailable) AirvoxPalette.Line else actionColor,
+                ),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = AirvoxPalette.White,
+                    containerColor = Color.Transparent,
+                    contentColor = actionColor,
+                    disabledContainerColor = Color.Transparent,
                     disabledContentColor = AirvoxPalette.Dim,
                 ),
             ) {
@@ -301,17 +312,20 @@ fun ChannelScreen(
 }
 
 private val SosRed = Color(0xFFFF4D4D)
+private val JoinGreen = Color(0xFF1F9D55)
+private val LeaveRed = Color(0xFFE23B3B)
 
 @Composable
 private fun HeaderIconButton(
     description: String,
     onClick: () -> Unit,
     borderColor: Color = AirvoxPalette.Line,
+    buttonSize: Dp = 40.dp,
     content: @Composable () -> Unit,
 ) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(buttonSize)
             .clearAndSetSemantics {
                 role = Role.Button
                 contentDescription = description
@@ -497,7 +511,7 @@ private fun VoxRow(
             modifier = Modifier
                 .semantics {
                     role = Role.Button
-                    contentDescription = if (enabled) "Turn Vox off" else "Turn Vox on"
+                    contentDescription = if (enabled) "Turn Voxy off" else "Turn Voxy on"
                 }
                 .clip(RoundedCornerShape(100.dp))
                 .background(if (enabled) AirvoxPalette.White else Color.Transparent)

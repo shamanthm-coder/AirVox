@@ -193,15 +193,43 @@ class AuthApiTest {
             }
         }
         withApi(sync = sync) {
-            client.post("/v1/session") { bearer("good") }
+            val created = client.post("/v1/session") { bearer("good") }
             val beat = client.post("/v1/heartbeat") {
                 bearer("good")
+                header("X-Airvox-Session", rootField(created.bodyAsText(), "sessionId"))
                 contentType(ContentType.Application.Json)
                 setBody("""{"credits":430}""")
             }
             assertEquals(HttpStatusCode.NoContent, beat.status)
         }
         assertEquals(listOf(430), balances)
+    }
+
+    @Test
+    fun aNewSignInReplacesThePreviousPhone() {
+        withApi {
+            val first = client.post("/v1/session") { bearer("good") }
+            val firstId = rootField(first.bodyAsText(), "sessionId")
+            val second = client.post("/v1/session") { bearer("good") }
+            val secondId = rootField(second.bodyAsText(), "sessionId")
+            assertTrue(firstId.isNotBlank())
+            assertTrue(firstId != secondId)
+            val oldPhone = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", firstId)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":1}""")
+            }
+            assertEquals(HttpStatusCode.Conflict, oldPhone.status)
+            assertTrue(oldPhone.bodyAsText().contains("signed_in_elsewhere"))
+            val newPhone = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", secondId)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":1}""")
+            }
+            assertEquals(HttpStatusCode.NoContent, newPhone.status)
+        }
     }
 
     @Test
@@ -265,13 +293,14 @@ class AuthApiTest {
             val early = client.post("/v1/heartbeat") { bearer("good") }
             assertEquals(HttpStatusCode.NotFound, early.status)
 
-            client.post("/v1/session") {
+            val created = client.post("/v1/session") {
                 bearer("good")
                 header("X-Airvox-Platform", "iOS")
             }
             val beat = client.post("/v1/heartbeat") {
                 bearer("good")
                 header("X-Airvox-Platform", "android")
+                header("X-Airvox-Session", rootField(created.bodyAsText(), "sessionId"))
             }
             assertEquals(HttpStatusCode.NoContent, beat.status)
             client.patch("/v1/me") {
@@ -418,7 +447,8 @@ class AuthApiTest {
             }
             assertEquals(HttpStatusCode.NotFound, early.status)
 
-            client.post("/v1/session") { bearer("good") }
+            val created = client.post("/v1/session") { bearer("good") }
+            val session = rootField(created.bodyAsText(), "sessionId")
             val joined = client.post("/v1/channels") {
                 bearer("good")
                 contentType(ContentType.Application.Json)
@@ -427,6 +457,7 @@ class AuthApiTest {
             assertEquals(HttpStatusCode.NoContent, joined.status)
             val here = client.post("/v1/heartbeat") {
                 bearer("good")
+                header("X-Airvox-Session", session)
                 contentType(ContentType.Application.Json)
                 setBody("""{"credits":3,"room":"ride1","mode":"Hotspot"}""")
             }

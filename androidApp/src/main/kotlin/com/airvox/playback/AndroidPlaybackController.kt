@@ -130,6 +130,14 @@ class AndroidPlaybackController(
         }
     }
 
+    override fun keepPlaying() {
+        voiceHold = false
+        resumeAfterVoice = false
+        refresh()
+        val current = controller ?: return
+        if (!isPlaying(current)) current.transportControls.play()
+    }
+
     fun dispose() {
         if (sessionsListenerRegistered) {
             runCatching { sessionManager.removeOnActiveSessionsChangedListener(sessionListener) }

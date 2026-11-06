@@ -24,6 +24,9 @@ interface Voxy {
 
     fun stop()
 
+    /** Stops the microphone and speech listener while off. */
+    fun setEnabled(enabled: Boolean) = Unit
+
     /**
      * When [enabled] is true, ask the rider and then listen while the phone is locked.
      * A notification stays visible the whole time the microphone is on.

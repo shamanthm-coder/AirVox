@@ -90,10 +90,11 @@ fun Application.airvoxApi(
                     rider,
                     welcomeCredits = welcome,
                     balanceOffset = store.balanceOffset(identity.uid),
+                    sessionId = saved.sessionId,
                 ),
             )
         }
-        // The app calls this every couple of minutes while it is open.
+        // The app calls this while it is open. A mismatched session means a newer phone signed in.
         post("/v1/heartbeat") {
             val identity = verifier.verify(call.requireToken())
             if (call.stopIfDeleted(store, identity.uid)) return@post
@@ -102,6 +103,11 @@ fun Application.airvoxApi(
                 call.respond(
                     HttpStatusCode.NotFound,
                     ApiError("unknown_rider", "Sign in again to create your Airvox profile."),
+                )
+            } else if (!store.sessionMatches(identity.uid, call.request.headers["X-Airvox-Session"])) {
+                call.respond(
+                    HttpStatusCode.Conflict,
+                    ApiError("signed_in_elsewhere", "This account signed in on another phone."),
                 )
             } else {
                 val body = runCatching { call.receive<HeartbeatBody>() }.getOrNull()

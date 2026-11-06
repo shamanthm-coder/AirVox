@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Instant
+import java.util.UUID
 import kotlinx.serialization.json.Json
 
 class RiderStore(
@@ -49,12 +50,19 @@ class RiderStore(
             balanceOffset = existing?.balanceOffset ?: 0,
             signInProvider = identity.signInProvider,
             providers = identity.providers.ifEmpty { listOf(identity.signInProvider) },
+            sessionId = UUID.randomUUID().toString(),
             createdAt = existing?.createdAt ?: now,
             lastSeenAt = now,
         )
         riders[identity.uid] = stored
         persist()
-        UpsertedRider(stored.toPublic(), created)
+        UpsertedRider(stored.toPublic(), created, stored.sessionId)
+    }
+
+    /** True when this phone is the one that last signed in. A blank stored id is a rider from before sessions existed. */
+    fun sessionMatches(uid: String, presented: String?): Boolean = synchronized(lock) {
+        val current = riders[uid]?.sessionId.orEmpty()
+        current.isEmpty() || presented == current
     }
 
     fun rename(uid: String, displayName: String): Rider? = synchronized(lock) {

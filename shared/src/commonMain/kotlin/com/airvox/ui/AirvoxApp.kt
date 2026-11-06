@@ -46,8 +46,8 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlin.time.Duration.Companion.milliseconds
 
-// The portal counts a rider as online for 5 minutes after a check-in.
-private const val HEARTBEAT_MS = 120_000L
+// Often enough to notice a sign-in on another phone. The portal still counts a rider online for 5 minutes.
+private const val HEARTBEAT_MS = 15_000L
 
 private enum class Destination(val label: String) {
     Channel("Channel"),
@@ -156,6 +156,7 @@ fun AirvoxApp(
     }
     if (auth.enforced && authState.needsProfile && authState.account?.profileComplete != true) {
         ProfileScreen(auth)
+        OtherDeviceDialog(auth)
         return
     }
 
@@ -292,11 +293,40 @@ fun AirvoxApp(
         }
     }
 
+    OtherDeviceDialog(auth)
     PhonePrompts(
         playback = playback,
         places = places,
         askForLocation = !locationAnswered,
         onLocationAnswered = { locationAnswered = true },
+    )
+}
+
+@Composable
+private fun OtherDeviceDialog(auth: AuthClient) {
+    if (!auth.state.value.signedInElsewhere) return
+    AlertDialog(
+        onDismissRequest = {},
+        confirmButton = {
+            Button(
+                onClick = auth::confirmOtherDevice,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AirvoxPalette.White,
+                    contentColor = AirvoxPalette.Black,
+                ),
+            ) {
+                Text("OK", fontWeight = FontWeight.Medium)
+            }
+        },
+        title = { Text("Signed in on another device") },
+        text = { Text("This account has logged in on another device.") },
+        containerColor = AirvoxPalette.Surface,
+        titleContentColor = AirvoxPalette.White,
+        textContentColor = AirvoxPalette.Muted,
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
     )
 }
 

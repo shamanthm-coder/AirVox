@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.annotation.RequiresPermission
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
@@ -28,18 +29,23 @@ class AndroidVox(
     private val session: AndroidIntercomSession,
     private val playback: PlaybackController,
 ) : Vox {
-    private val stateHolder = mutableStateOf(VoxState())
+    private val stateHolder = mutableStateOf(
+        VoxState(
+            enabled = false,
+            phase = VoxPhase.Off,
+            line = "Vox is off. Tap Talk to speak. Music pauses while someone is talking.",
+        ),
+    )
     override val state: State<VoxState> = stateHolder
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gateLock = Any()
-    private var enabled = true
+    private var enabled = false
     private var heldOff = false
     private var manual = false
     private var disposed = false
     private var pendingRoom = ""
     private var pendingPassword = ""
-    private var joinedPassword = ""
     private var pendingPath = ChannelPath.Hotspot
     private var earPaused = false
 
@@ -53,15 +59,6 @@ class AndroidVox(
     private var speechSince = 0L
     private var quietSince = 0L
     private var rearmAt = 0L
-
-    private val autoConnect = Runnable {
-        val room = normalize(pendingRoom)
-        val secret = pendingPassword.trim().take(32)
-        if (disposed || !enabled || heldOff || room.length < 3 || secret.length < 4) return@Runnable
-        joinedPassword = secret
-        session.join(room, pendingPath, secret)
-        sync()
-    }
 
     private val watch = object : Runnable {
         override fun run() {
@@ -79,15 +76,12 @@ class AndroidVox(
     override fun setEnabled(enabled: Boolean) {
         this.enabled = enabled
         if (!enabled) {
-            mainHandler.removeCallbacks(autoConnect)
             manual = false
             hearingSpeech = false
             resetGate()
             if (session.state.value.localTalking) session.setTalking(false)
             stopEar()
             resumeMusicIfQuiet()
-        } else {
-            schedule()
         }
         sync()
     }
@@ -98,7 +92,6 @@ class AndroidVox(
         pendingPassword = password
         pendingPath = path
         if (changed) heldOff = false
-        schedule()
     }
 
     override fun connect(roomCode: String, path: ChannelPath, password: String) {
@@ -106,7 +99,6 @@ class AndroidVox(
         pendingPassword = password
         pendingPath = path
         heldOff = false
-        mainHandler.removeCallbacks(autoConnect)
         val room = normalize(roomCode)
         val secret = password.trim().take(32)
         if (room.length < 3) {
@@ -117,7 +109,6 @@ class AndroidVox(
             publish(VoxPhase.Ready, "Vox needs a password with at least 4 characters. Both phones use the same one.")
             return
         }
-        joinedPassword = secret
         session.join(room, path, secret)
         sync()
     }
@@ -127,7 +118,6 @@ class AndroidVox(
         manual = false
         hearingSpeech = false
         resetGate()
-        mainHandler.removeCallbacks(autoConnect)
         stopEar()
         session.leave()
         sync()
@@ -136,7 +126,11 @@ class AndroidVox(
     override fun setEarPaused(paused: Boolean) {
         if (earPaused == paused) return
         earPaused = paused
-        if (paused) stopEar()
+        if (paused) {
+            stopEar()
+            hearingSpeech = false
+            resetGate()
+        }
         sync()
     }
 
@@ -174,24 +168,8 @@ class AndroidVox(
         session.onMicLevel = null
     }
 
-    private fun schedule() {
-        mainHandler.removeCallbacks(autoConnect)
-        if (!enabled || heldOff) return
-        val room = normalize(pendingRoom)
-        val secret = pendingPassword.trim().take(32)
-        if (room.length < 3 || secret.length < 4) return
-        val intercom = session.state.value
-        val sameRoom = intercom.roomCode == room &&
-            intercom.path == pendingPath &&
-            joinedPassword == secret
-        val alreadyThere = intercom.connection == IntercomConnection.Connecting ||
-            intercom.connection == IntercomConnection.Connected
-        if (alreadyThere && sameRoom) return
-        mainHandler.postDelayed(autoConnect, 900)
-    }
-
     private fun onLevel(rms: Int) {
-        if (!enabled || manual || disposed) return
+        if (!enabled || manual || disposed || earPaused) return
         val nowSpeaking = synchronized(gateLock) { gate(rms, SystemClock.elapsedRealtime()) }
         if (nowSpeaking == hearingSpeech) return
         hearingSpeech = nowSpeaking
@@ -257,6 +235,7 @@ class AndroidVox(
             publish(VoxPhase.Hearing, "Vox paused the music so you can hear the other phone.")
             return
         }
+        if (earPaused) hearingSpeech = false
         if (hearingSpeech && !intercom.remoteTalking) {
             playback.pauseForVoice()
             if (intercom.connection == IntercomConnection.Connected && !intercom.localTalking) {
@@ -285,7 +264,7 @@ class AndroidVox(
                 "Vox has the other phone. Music plays until someone talks."
             intercom.connection == IntercomConnection.Connecting ->
                 "Vox is connecting to the other phone. Music stays on."
-            else -> "Vox will connect this room, and pause the music when someone talks."
+            else -> "Tap Join channel. Vox pauses the music when someone talks."
         }
         val phase = when (intercom.connection) {
             IntercomConnection.Connected -> VoxPhase.Listening
@@ -353,6 +332,7 @@ class AndroidVox(
         recorder?.let { runCatching { it.release() } }
     }
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun openMic(): Mic? {
         for (rate in intArrayOf(8000, 16000)) {
             val min = AudioRecord.getMinBufferSize(

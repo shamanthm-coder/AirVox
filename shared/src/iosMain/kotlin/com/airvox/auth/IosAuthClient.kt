@@ -63,6 +63,8 @@ class IosAuthClient(
     private var tokens: Tokens? = loadTokens()
     private val _state = mutableStateOf(AuthState(phase = AuthPhase.Restoring))
     override val state: State<AuthState> = _state
+    /** False while this phone is opening its own session, so that check-in cannot sign it out. */
+    private var noticeOtherSignIn = false
 
     init {
         loadChannelQueue()
@@ -209,10 +211,12 @@ class IosAuthClient(
     }
 
     override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
-        if (tokens == null || _state.value.account == null) return
+        if (tokens == null || _state.value.account == null || _state.value.signedInElsewhere) return
         scope.launch {
             flushChannels()
-            runCatching {
+            val sent = store.stringForKey(KEY_SESSION).orEmpty()
+            val rejected = runCatching {
+                if (sent.isEmpty()) return@runCatching false
                 val body = buildJsonObject {
                     put("credits", credits)
                     if (clearOffset) put("clearOffset", true)
@@ -222,7 +226,13 @@ class IosAuthClient(
                         put("mode", channel.second)
                     }
                 }
-                send("POST", "$baseUrl/v1/heartbeat", idToken(), body.toString())
+                val reply = send("POST", "$baseUrl/v1/heartbeat", idToken(), body.toString())
+                reply.status == 409 &&
+                    "signed_in_elsewhere" in reply.body &&
+                    store.stringForKey(KEY_SESSION).orEmpty() == sent
+            }.getOrDefault(false)
+            if (rejected && noticeOtherSignIn && store.stringForKey(KEY_SESSION).orEmpty() == sent && _state.value.account != null) {
+                update { it.copy(signedInElsewhere = true) }
             }
         }
     }
@@ -297,6 +307,18 @@ class IosAuthClient(
             val remaining = 700L - (now() - started)
             if (remaining > 0) delay(remaining.milliseconds)
             saveTokens(null)
+            store.removeObjectForKey(KEY_SESSION)
+            update { AuthState(phase = AuthPhase.Ready, configured = configured) }
+        }
+    }
+
+    override fun confirmOtherDevice() {
+        if (!_state.value.signedInElsewhere) return
+        noticeOtherSignIn = false
+        scope.launch {
+            val configured = firebaseApiKey.isNotBlank()
+            saveTokens(null)
+            store.removeObjectForKey(KEY_SESSION)
             update { AuthState(phase = AuthPhase.Ready, configured = configured) }
         }
     }
@@ -357,6 +379,7 @@ class IosAuthClient(
     }
 
     private suspend fun openSession(displayName: String? = null, needsProfile: Boolean = false) {
+        noticeOtherSignIn = false
         try {
             val created = exchange(send("POST", "$baseUrl/v1/session", idToken(), body = "{}"))
             val name = displayName?.trim()?.takeIf { validName(it) }
@@ -375,8 +398,10 @@ class IosAuthClient(
                     busy = false,
                     error = null,
                     needsProfile = needsProfile && !rider.profileComplete,
+                    signedInElsewhere = false,
                 )
             }
+            noticeOtherSignIn = true
         } catch (error: CancellationException) {
             throw error
         } catch (error: SessionFailed) {
@@ -391,8 +416,10 @@ class IosAuthClient(
                     busy = false,
                     error = null,
                     needsProfile = needsProfile && !account.profileComplete,
+                    signedInElsewhere = false,
                 )
             }
+            noticeOtherSignIn = true
         }
     }
 
@@ -472,6 +499,7 @@ class IosAuthClient(
             val message = parsed?.string("message") ?: "Airvox couldn't open your session (${reply.status})."
             throw SessionFailed(message, signedOut = reply.status == 401 || reply.status == 410)
         }
+        parsed.string("sessionId")?.let { store.setObject(it, KEY_SESSION) }
         val rider = parseRider(parsed["rider"]!!.jsonObject)
         return rider.copy(
             welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
@@ -588,7 +616,11 @@ class IosAuthClient(
         request.setValue(contentType, forHTTPHeaderField = "Content-Type")
         if (token != null) request.setValue("Bearer $token", forHTTPHeaderField = "Authorization")
         // Lets the Airvox API record which app the rider uses, for the admin portal.
-        if (url.startsWith(baseUrl)) request.setValue("iOS", forHTTPHeaderField = "X-Airvox-Platform")
+        if (url.startsWith(baseUrl)) {
+            request.setValue("iOS", forHTTPHeaderField = "X-Airvox-Platform")
+            val session = store.stringForKey(KEY_SESSION)
+            if (!session.isNullOrBlank()) request.setValue(session, forHTTPHeaderField = "X-Airvox-Session")
+        }
         if (body != null) request.setHTTPBody(NSString.create(string = body).dataUsingEncoding(NSUTF8StringEncoding))
         val task = NSURLSession.sharedSession.dataTaskWithRequest(request) { data, response, error ->
             val reply = if (error != null) {
@@ -608,6 +640,7 @@ class IosAuthClient(
         const val KEY_REFRESH = "airvox.auth.refreshToken"
         const val KEY_EXPIRES = "airvox.auth.expiresAt"
         const val KEY_RIDER = "airvox.auth.rider"
+        const val KEY_SESSION = "airvox.auth.session"
         const val KEY_CHANNELS = "airvox.channels.queue"
 
         fun now(): Long = NSDate().timeIntervalSince1970.toLong()
