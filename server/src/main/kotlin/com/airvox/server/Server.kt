@@ -23,6 +23,7 @@ import io.ktor.server.routing.routing
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Properties
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -41,6 +42,8 @@ fun Application.airvoxApi(
     staff: StaffGate = StaffGate { false },
     accounts: AccountDeleter = AccountDeleter { false },
 ) {
+    // Phones that already reported a real balance. A later 0 from those phones is a real spend.
+    val phonesHoldingCredits = ConcurrentHashMap.newKeySet<String>()
     install(ContentNegotiation) { json(apiJson) }
     install(CORS) {
         allowMethod(HttpMethod.Delete)
@@ -90,6 +93,7 @@ fun Application.airvoxApi(
                     rider,
                     welcomeCredits = welcome,
                     balanceOffset = store.balanceOffset(identity.uid),
+                    walletBalance = runCatching { sync.walletBalance(identity.uid) }.getOrNull() ?: 0,
                     sessionId = saved.sessionId,
                 ),
             )
@@ -114,7 +118,16 @@ fun Application.airvoxApi(
                 val credits = body?.credits ?: -1
                 sync.riderSeen(rider, call.platform())
                 if (credits in 0..1_000_000) {
-                    sync.setWallet(rider, store.walletToStore(identity.uid, credits, body?.clearOffset == true))
+                    val stored = runCatching { sync.walletBalance(identity.uid) }.getOrNull()
+                    // A phone that just signed in, or that could not reach the server, still has 0
+                    // until it loads the saved wallet. That 0 must not wipe the portal balance.
+                    val emptyPhone = credits == 0 &&
+                        (stored == null || stored > 0) &&
+                        identity.uid !in phonesHoldingCredits
+                    if (credits > 0) phonesHoldingCredits.add(identity.uid)
+                    if (!emptyPhone) {
+                        sync.setWallet(rider, store.walletToStore(identity.uid, credits, body?.clearOffset == true))
+                    }
                 }
                 val room = normalizeRoom(body?.room)
                 val mode = normalizeMode(body?.mode)

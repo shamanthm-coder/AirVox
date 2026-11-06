@@ -704,11 +704,8 @@ private fun AudioControlCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 PlaybackAction("Previous", Modifier.weight(1f), playback::skipPrevious)
-                PlaybackAction(
-                    label = if (nowPlaying.paused) "Play" else "Pause",
-                    modifier = Modifier.weight(1f),
-                    onClick = playback::togglePlay,
-                )
+                PlaybackAction("Play", Modifier.weight(1f), playback::play)
+                PlaybackAction("Pause", Modifier.weight(1f), playback::pause)
                 PlaybackAction("Next", Modifier.weight(1f), playback::skipNext)
             }
         }

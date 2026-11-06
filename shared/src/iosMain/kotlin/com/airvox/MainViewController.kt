@@ -12,9 +12,11 @@ import com.airvox.intercom.IosIntercomSession
 import com.airvox.intercom.IosVoiceCall
 import com.airvox.location.IosPlaceReporter
 import com.airvox.map.IosRiderMap
+import com.airvox.playback.IosPlaybackController
+import com.airvox.playback.IosSystemPlayback
 import com.airvox.vox.IosVox
 
-fun MainViewController(voice: IosVoiceCall) = ComposeUIViewController(
+fun MainViewController(voice: IosVoiceCall, playback: IosSystemPlayback) = ComposeUIViewController(
     // The default waits to slide the field above the keyboard before showing it.
     // On iPhone that wait is about 10 seconds. Show the keyboard immediately.
     configure = {
@@ -27,8 +29,10 @@ fun MainViewController(voice: IosVoiceCall) = ComposeUIViewController(
     val places = remember { IosPlaceReporter(session) }
     val map = remember { IosRiderMap() }
     val vox = remember { IosVox(session) }
+    val nowPlaying = remember(playback) { IosPlaybackController(playback) }
     App(
         session = session,
+        playback = nowPlaying,
         vox = vox,
         places = places,
         map = map,

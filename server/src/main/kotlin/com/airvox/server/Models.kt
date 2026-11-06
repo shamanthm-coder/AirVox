@@ -25,6 +25,8 @@ data class RiderResponse(
      * to an account that already had one. Stays until the phone confirms it.
      */
     val balanceOffset: Int = 0,
+    /** Credits saved in the portal. The phone uses this when its own wallet is empty. */
+    val walletBalance: Int = 0,
     /** This sign-in. An older phone still holding the previous id is signed out. */
     val sessionId: String = "",
 )

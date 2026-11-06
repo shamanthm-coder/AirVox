@@ -9,10 +9,11 @@ struct iOSApp: App {
     }
 
     private let voice = AirvoxWebRtc()
+    private let playback = AirvoxPlayback()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(voice: voice)
+            ContentView(voice: voice, playback: playback)
         }
     }
 }

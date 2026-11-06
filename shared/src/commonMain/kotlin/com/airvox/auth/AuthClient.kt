@@ -16,6 +16,8 @@ data class RiderAccount(
     val welcomeCredits: Int = 0,
     /** Extra welcome credits to remove. 0 once the phone has taken them off. */
     val balanceOffset: Int = 0,
+    /** Credits saved in the portal. 0 when this sign-in could not read them. */
+    val walletBalance: Int = 0,
 )
 
 enum class AuthPhase {

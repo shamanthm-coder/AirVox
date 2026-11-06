@@ -86,6 +86,10 @@ class IosIntercomSession(
     private var mesh: MCSession? = null
     private var realtime: IosRealtime? = null
     private var lan: IosLanChannel? = null
+    private var ble: IosBleChannel? = null
+    private val bleTalkers = linkedSetOf<String>()
+    private val bleTalkTicket = HashMap<String, Int>()
+    private val bleVoice = IosBleVoice(onFrame = { frame -> ble?.sendAudio(frame) })
     private var pendingRoom: String? = null
     private var pendingSecret: String? = null
     private var pendingPath = ChannelPath.Hotspot
@@ -190,6 +194,7 @@ class IosIntercomSession(
         if (trimmed.isBlank() || trimmed == selfName) return
         selfName = trimmed
         lan?.rename(trimmed)
+        ble?.rename(trimmed)
         realtime?.rename(trimmed)
         if (path != ChannelPath.Internet && mesh != null) {
             sendSignal(buildJsonObject {
@@ -255,6 +260,17 @@ class IosIntercomSession(
             return
         }
         localTalking = talking
+        if (path == ChannelPath.Bluetooth) {
+            bleVoice.mutePlayback(talking)
+            if (talking) bleVoice.startCapture() else bleVoice.stopCapture()
+            sendSignal(buildJsonObject {
+                put("kind", "talk")
+                put("talking", talking)
+            })
+            if (talking) startTalkPulse() else stopTalkPulse()
+            publish()
+            return
+        }
         voice.setMicEnabled(talking)
         sendSignal(buildJsonObject {
             put("kind", "talk")
@@ -284,19 +300,20 @@ class IosIntercomSession(
             publish()
             return
         }
-        voice.prepare(selected == ChannelPath.Internet)
         val key = channelKey(normalized, password)
         currentKey = key
         if (selected == ChannelPath.Internet) {
+            voice.prepare(true)
             openInternet(key, gen)
         } else if (selected == ChannelPath.Hotspot) {
+            voice.prepare(false)
             channelReady = true
             openLan(key, gen)
             detail = waitingDetail()
             publish()
         } else {
             channelReady = true
-            openNearby(key)
+            openBle(key, gen)
             detail = waitingDetail()
             publish()
         }
@@ -323,6 +340,53 @@ class IosIntercomSession(
         )
         lan = channel
         channel.start(key, selfId, selfName)
+    }
+
+    private fun openBle(key: String, gen: Int) {
+        val channel = IosBleChannel(
+            onJoined = {
+                if (gen != generation) return@IosBleChannel
+                channelReady = true
+                detail = waitingDetail()
+                publish()
+            },
+            onPresence = { members ->
+                if (gen != generation) return@IosBleChannel
+                meshRoster.clear()
+                members.forEach { (id, name) -> if (id != selfId) meshRoster[id] = name }
+                refreshConnection()
+            },
+            onSignal = { text -> if (gen == generation) handleSignal(text) },
+            onAudio = { id, audio ->
+                if (gen != generation) return@IosBleChannel
+                bleVoice.enqueue(audio)
+                noteBleTalk(id, true)
+            },
+            onClosed = { reason ->
+                if (gen != generation) return@IosBleChannel
+                detail = reason
+                publish()
+            },
+        )
+        ble = channel
+        channel.start(key, selfId, selfName)
+    }
+
+    private fun noteBleTalk(id: String, talking: Boolean) {
+        val ticket = (bleTalkTicket[id] ?: 0) + 1
+        bleTalkTicket[id] = ticket
+        if (talking) {
+            bleTalkers.add(id)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 900_000_000), dispatch_get_main_queue()) {
+                if (bleTalkTicket[id] == ticket) {
+                    bleTalkers.remove(id)
+                    publish()
+                }
+            }
+        } else {
+            bleTalkers.remove(id)
+        }
+        publish()
     }
 
     private fun openNearby(key: String) {
@@ -388,8 +452,8 @@ class IosIntercomSession(
         when (message.string("kind")) {
             "hello" -> {
                 if (path == ChannelPath.Internet) return
-                meshRoster[from] = message.string("name") ?: "iPhone"
-                syncPeers()
+                meshRoster[from] = message.string("name") ?: "Phone"
+                if (path == ChannelPath.Bluetooth) refreshConnection() else syncPeers()
             }
             "offer" -> {
                 if (path != ChannelPath.Internet && meshRoster[from] == null) {
@@ -424,6 +488,10 @@ class IosIntercomSession(
             }
             "talk" -> {
                 val talking = message.bool("talking")
+                if (path == ChannelPath.Bluetooth) {
+                    noteBleTalk(from, talking)
+                    return
+                }
                 val link = peers[from]
                 if (link == null) {
                     earlyTalk[from] = talking
@@ -499,6 +567,16 @@ class IosIntercomSession(
     }
 
     private fun refreshConnection() {
+        if (path == ChannelPath.Bluetooth) {
+            if (roster().any { it.key != selfId }) {
+                markConnected()
+            } else if (connection != IntercomConnection.Disconnected) {
+                connection = IntercomConnection.Connecting
+                detail = if (channelReady) waitingDetail() else detail
+                publish()
+            }
+            return
+        }
         if (peers.values.any { it.iceConnected }) {
             markConnected()
             return
@@ -593,6 +671,8 @@ class IosIntercomSession(
             realtime?.send(signal)
         } else if (path == ChannelPath.Hotspot) {
             lan?.send(signal.toString())
+        } else if (path == ChannelPath.Bluetooth) {
+            ble?.send(signal.toString())
         } else {
             sendMesh(signal.toString())
         }
@@ -633,6 +713,11 @@ class IosIntercomSession(
         mesh = null
         lan?.close()
         lan = null
+        ble?.close()
+        ble = null
+        bleVoice.stop()
+        bleTalkers.clear()
+        bleTalkTicket.clear()
         realtime?.close()
         realtime = null
         currentKey = null
@@ -652,7 +737,7 @@ class IosIntercomSession(
             path = path,
             members = memberList(),
             localTalking = localTalking,
-            remoteTalking = peers.values.any { it.talking },
+            remoteTalking = if (path == ChannelPath.Bluetooth) bleTalkers.isNotEmpty() else peers.values.any { it.talking },
             places = placeList(),
             detail = detail,
         )
@@ -677,7 +762,10 @@ class IosIntercomSession(
         if (connection == IntercomConnection.Disconnected) return emptyList()
         val others = roster()
             .filterKeys { it != selfId }
-            .map { (id, name) -> IntercomMember(id = id, name = name, talking = peers[id]?.talking == true) }
+            .map { (id, name) ->
+                val talking = if (path == ChannelPath.Bluetooth) id in bleTalkers else peers[id]?.talking == true
+                IntercomMember(id = id, name = name, talking = talking)
+            }
         return listOf(IntercomMember(selfId, "$selfName (you)", localTalking)) + others
     }
 

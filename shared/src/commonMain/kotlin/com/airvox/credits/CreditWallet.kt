@@ -37,6 +37,12 @@ class CreditWallet(
         update { it.copy(credits = it.credits + amount) }
     }
 
+    /** Uses the portal balance when this phone has less saved than the portal. */
+    fun adopt(amount: Int) {
+        if (amount <= _state.value.credits) return
+        update { it.copy(credits = amount) }
+    }
+
     /** Removes credits that were added by mistake, such as a second welcome grant. */
     fun remove(amount: Int) {
         if (amount <= 0) return

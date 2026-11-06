@@ -206,6 +206,45 @@ class AuthApiTest {
     }
 
     @Test
+    fun anEmptyPhoneDoesNotWipeThePortalBalance() {
+        val balances = mutableListOf<Int>()
+        val sync = object : RiderSync {
+            override fun riderSeen(rider: Rider, platform: String?) = Unit
+            override fun walletBalance(firebaseUid: String) = 72
+            override fun setWallet(rider: Rider, credits: Int) {
+                balances += credits
+            }
+        }
+        withApi(sync = sync) {
+            val created = client.post("/v1/session") { bearer("good") }
+            assertEquals("72", rootField(created.bodyAsText(), "walletBalance"))
+            val session = rootField(created.bodyAsText(), "sessionId")
+            val wiped = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", session)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":0}""")
+            }
+            assertEquals(HttpStatusCode.NoContent, wiped.status)
+            val spent = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", session)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":40}""")
+            }
+            assertEquals(HttpStatusCode.NoContent, spent.status)
+            val finished = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", session)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":0}""")
+            }
+            assertEquals(HttpStatusCode.NoContent, finished.status)
+        }
+        assertEquals(listOf(40, 0), balances)
+    }
+
+    @Test
     fun aNewSignInReplacesThePreviousPhone() {
         withApi {
             val first = client.post("/v1/session") { bearer("good") }

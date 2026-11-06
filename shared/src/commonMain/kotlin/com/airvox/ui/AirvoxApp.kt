@@ -122,7 +122,7 @@ fun AirvoxApp(
     val signedIn = authState.account
     var walletReady by remember { mutableStateOf<String?>(null) }
     var clearOffset by remember { mutableStateOf(false) }
-    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits, signedIn?.balanceOffset) {
+    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits, signedIn?.balanceOffset, signedIn?.walletBalance) {
         val account = signedIn
         if (account == null) {
             walletReady = null
@@ -136,6 +136,10 @@ fun AirvoxApp(
                 markOffsetRemoved(account.id, account.balanceOffset)
             }
             clearOffset = true
+        }
+        // The portal keeps the balance. An empty phone must take that number, not push 0 back.
+        if (account.walletBalance > wallet.state.value.credits) {
+            wallet.adopt(account.walletBalance)
         }
         walletReady = account.id
     }

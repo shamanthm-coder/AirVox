@@ -388,7 +388,11 @@ class IosAuthClient(
             } else {
                 // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
                 patchProfile(idToken(), name, phone = null, complete = false)
-                    .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+                    .copy(
+                        welcomeCredits = created.welcomeCredits,
+                        balanceOffset = created.balanceOffset,
+                        walletBalance = created.walletBalance,
+                    )
             }
             saveRider(rider)
             update {
@@ -504,6 +508,7 @@ class IosAuthClient(
         return rider.copy(
             welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
             balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
+            walletBalance = parsed.string("walletBalance")?.toIntOrNull() ?: 0,
         )
     }
 
@@ -566,6 +571,7 @@ class IosAuthClient(
             put("profileComplete", rider.profileComplete)
             put("welcomeCredits", rider.welcomeCredits)
             put("balanceOffset", rider.balanceOffset)
+            put("walletBalance", rider.walletBalance)
             if (rider.phoneNumber != null) put("phoneNumber", rider.phoneNumber)
             if (rider.email != null) put("email", rider.email)
             if (rider.displayName != null) put("displayName", rider.displayName)
@@ -589,6 +595,7 @@ class IosAuthClient(
             profileComplete = (parsed["profileComplete"] as? JsonPrimitive)?.booleanOrNull ?: false,
             welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
             balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
+            walletBalance = parsed.string("walletBalance")?.toIntOrNull() ?: 0,
         )
     }
 

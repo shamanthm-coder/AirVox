@@ -35,6 +35,12 @@ fun interface RiderSync {
     /** The balance currently shown on the phone, so the portal wallet matches it. */
     fun setWallet(rider: Rider, credits: Int) = Unit
 
+    /**
+     * Credits saved for this account in the portal.
+     * Null when the lookup failed, so a missed call does not look like an empty wallet.
+     */
+    fun walletBalance(firebaseUid: String): Int? = null
+
     /** Active credit packs, cheapest first. Empty when Supabase has none. */
     fun activePlans(): List<PlanOffer> = emptyList()
 
@@ -140,6 +146,18 @@ class SupabaseRiderSync(
             }.onFailure { error ->
                 System.err.println("Supabase wallet update failed for rider ${rider.id}: ${error.message}")
             }
+        }
+    }
+
+    override fun walletBalance(firebaseUid: String): Int? {
+        return try {
+            val saved = get("app_users?firebase_uid=eq.${encode(firebaseUid)}&select=wallet_balance")
+            val rows = Json.parseToJsonElement(saved).jsonArray
+            if (rows.isEmpty()) return 0
+            rows.first().jsonObject["wallet_balance"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+        } catch (error: Exception) {
+            System.err.println("Supabase wallet lookup failed for rider $firebaseUid: ${error.message}")
+            null
         }
     }
 

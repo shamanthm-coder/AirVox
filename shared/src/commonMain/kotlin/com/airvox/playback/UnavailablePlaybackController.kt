@@ -10,6 +10,10 @@ class UnavailablePlaybackController : PlaybackController {
 
     override fun refresh() = Unit
 
+    override fun play() = Unit
+
+    override fun pause() = Unit
+
     override fun togglePlay() = Unit
 
     override fun skipNext() = Unit

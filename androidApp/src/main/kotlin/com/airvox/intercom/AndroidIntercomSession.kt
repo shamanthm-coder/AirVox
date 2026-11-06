@@ -50,6 +50,7 @@ class AndroidIntercomSession(
 
     private var generation = 0
     private var nearby: NearbyChannel? = null
+    private var ble: BleChannel? = null
     private var lan: LanChannel? = null
     private var internet: SupabaseRealtime? = null
     private var path = ChannelPath.Hotspot
@@ -59,7 +60,10 @@ class AndroidIntercomSession(
     @Volatile var onMicLevel: ((Int) -> Unit)? = null
 
     private val bluetoothVoice = BluetoothVoice(
-        onFrame = { frame -> nearby?.sendAudio(frame) },
+        onFrame = { frame ->
+            nearby?.sendAudio(frame)
+            ble?.sendAudio(frame)
+        },
         onError = { message ->
             mainHandler.post {
                 detail = message
@@ -125,6 +129,7 @@ class AndroidIntercomSession(
         selfName = trimmed
         lan?.rename(trimmed)
         nearby?.rename(trimmed)
+        ble?.rename(trimmed)
         internet?.rename(trimmed)
         lastSentAt = 0L
         broadcastPlace(force = true)
@@ -257,9 +262,8 @@ class AndroidIntercomSession(
             channel.connect(normalized, selfId, selfName)
             return
         }
-        nearby = NearbyChannel(
-            activity = activity,
-            bluetoothOnly = path == ChannelPath.Bluetooth,
+        ble = BleChannel(
+            context = activity,
             listener = object : NearbyChannel.Listener {
                 override fun onJoined() = signalJoined(gen)
 
@@ -276,7 +280,7 @@ class AndroidIntercomSession(
                 override fun onClosed(reason: String) = signalClosed(gen, reason)
             },
         )
-        nearby?.connect(normalized, selfId, selfName)
+        ble?.connect(normalized, selfId, selfName)
     }
 
     private fun connectInternet(gen: Int, normalized: String) {
@@ -526,7 +530,10 @@ class AndroidIntercomSession(
         when (path) {
             ChannelPath.Hotspot -> lan?.send(body)
             ChannelPath.Internet -> internet?.send(body)
-            else -> nearby?.send(body)
+            else -> {
+                nearby?.send(body)
+                ble?.send(body)
+            }
         }
     }
 
@@ -870,6 +877,8 @@ class AndroidIntercomSession(
         placeAudience = emptySet()
         nearby?.close()
         nearby = null
+        ble?.close()
+        ble = null
         lan?.close()
         lan = null
         internet?.close()

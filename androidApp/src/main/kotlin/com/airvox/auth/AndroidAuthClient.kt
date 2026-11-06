@@ -472,7 +472,11 @@ class AndroidAuthClient(
                 } else {
                     // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
                     patchProfile(token, name, phone = null, complete = false)
-                        .copy(welcomeCredits = created.welcomeCredits, balanceOffset = created.balanceOffset)
+                        .copy(
+                            welcomeCredits = created.welcomeCredits,
+                            balanceOffset = created.balanceOffset,
+                            walletBalance = created.walletBalance,
+                        )
                 }
             }
             val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = false) }
@@ -558,6 +562,7 @@ class AndroidAuthClient(
             .put("profileComplete", rider.profileComplete)
             .put("welcomeCredits", rider.welcomeCredits)
             .put("balanceOffset", rider.balanceOffset)
+            .put("walletBalance", rider.walletBalance)
             .put("providers", JSONArray(rider.providers))
         json.putNullable("phoneNumber", rider.phoneNumber)
         json.putNullable("email", rider.email)
@@ -580,6 +585,7 @@ class AndroidAuthClient(
             profileComplete = rider.optBoolean("profileComplete", false),
             welcomeCredits = rider.optInt("welcomeCredits", 0),
             balanceOffset = rider.optInt("balanceOffset", 0),
+            walletBalance = rider.optInt("walletBalance", 0),
         )
     }
 
@@ -730,6 +736,7 @@ private fun parseRider(body: String): RiderAccount {
         profileComplete = rider.optBoolean("profileComplete", false),
         welcomeCredits = root.optInt("welcomeCredits", 0),
         balanceOffset = root.optInt("balanceOffset", 0),
+        walletBalance = root.optInt("walletBalance", 0),
     )
 }
 

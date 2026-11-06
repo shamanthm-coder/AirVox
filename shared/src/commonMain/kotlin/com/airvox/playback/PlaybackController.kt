@@ -22,6 +22,10 @@ interface PlaybackController {
 
     fun refresh()
 
+    fun play()
+
+    fun pause()
+
     fun togglePlay()
 
     fun skipNext()

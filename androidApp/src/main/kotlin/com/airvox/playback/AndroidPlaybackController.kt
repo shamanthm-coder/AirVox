@@ -69,20 +69,18 @@ class AndroidPlaybackController(
         attach(sessions)
     }
 
-    override fun togglePlay() {
-        val controls = controller?.transportControls
-        if (controls != null) {
-            if (isPlaying(controller)) controls.pause() else controls.play()
-        } else {
-            sendMediaKey(
-                if (nowPlayingState.value.paused) {
-                    KeyEvent.KEYCODE_MEDIA_PLAY
-                } else {
-                    KeyEvent.KEYCODE_MEDIA_PAUSE
-                },
-            )
-        }
+    override fun play() {
+        controller?.transportControls?.play() ?: sendMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
         mainHandler.postDelayed(::refresh, 250)
+    }
+
+    override fun pause() {
+        controller?.transportControls?.pause() ?: sendMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
+        mainHandler.postDelayed(::refresh, 250)
+    }
+
+    override fun togglePlay() {
+        if (isPlaying(controller) || !nowPlayingState.value.paused) pause() else play()
     }
 
     override fun skipNext() {
