@@ -35,14 +35,26 @@ fun interface RiderSync {
     /** [kind] is "consume" or "purchase". [credits] is how many points moved. */
     fun recordCredits(rider: Rider, kind: String, credits: Int) = Unit
 
-    /** The balance currently shown on the phone, so the portal wallet matches it. */
-    fun setWallet(rider: Rider, credits: Int) = Unit
+    /**
+     * Adds [delta] credits to the rider's wallet, or takes them off when it is negative.
+     * The wallet never goes below 0. Returns the new balance, or null when it could not be saved.
+     */
+    fun changeWallet(rider: Rider, delta: Int): Int? = null
+
+    /**
+     * Staff added credits from the portal. [userId] is the app_users id.
+     * Returns the new balance, or null when that rider is gone.
+     */
+    fun addCredits(userId: String, credits: Int): Int? = null
 
     /**
      * Credits saved for this account in the portal.
      * Null when the lookup failed, so a missed call does not look like an empty wallet.
      */
     fun walletBalance(firebaseUid: String): Int? = null
+
+    /** The mobile number saved in the portal for this account, if any. */
+    fun portalPhone(firebaseUid: String): String? = null
 
     /** Active credit packs, cheapest first. Empty when Supabase has none. */
     fun activePlans(): List<PlanOffer> = emptyList()
@@ -72,8 +84,16 @@ fun interface RiderSync {
     fun stopChannel(channelId: String): Boolean = false
 }
 
-object NoRiderSync : RiderSync {
+/** No Supabase. Wallets live in memory, so the app still works against a local server. */
+open class LocalRiderSync : RiderSync {
+    private val wallets = ConcurrentHashMap<String, Int>()
+
     override fun riderSeen(rider: Rider, platform: String?) = Unit
+
+    override fun changeWallet(rider: Rider, delta: Int): Int =
+        wallets.merge(rider.id, delta.coerceAtLeast(0)) { held, _ -> (held + delta).coerceAtLeast(0) }!!
+
+    override fun walletBalance(firebaseUid: String): Int = wallets[firebaseUid] ?: 0
 }
 
 /**
@@ -172,31 +192,63 @@ class SupabaseRiderSync(
         }
     }
 
-    override fun setWallet(rider: Rider, credits: Int) {
-        worker.execute {
-            runCatching {
-                send(
-                    "app_users?firebase_uid=eq.${encode(rider.id)}",
-                    """{"wallet_balance":$credits}""",
-                    prefer = "return=minimal",
-                    method = "PATCH",
-                )
-            }.onFailure { error ->
-                System.err.println("Supabase wallet update failed for rider ${rider.id}: ${error.message}")
+    override fun changeWallet(rider: Rider, delta: Int): Int? {
+        return try {
+            val filter = "app_users?firebase_uid=eq.${encode(rider.id)}"
+            var held = savedWallet(filter)
+            if (held == null) {
+                // A brand-new rider has no row until the first copy lands.
+                sync(rider, null)
+                held = savedWallet(filter) ?: 0
             }
+            saveWallet(filter, held + delta)
+        } catch (error: Exception) {
+            System.err.println("Supabase wallet update failed for rider ${rider.id}: ${error.message}")
+            null
         }
+    }
+
+    override fun addCredits(userId: String, credits: Int): Int? {
+        val filter = "app_users?id=eq.${encode(userId)}"
+        val held = savedWallet(filter) ?: return null
+        val balance = saveWallet(filter, held + credits)
+        send(
+            "credit_transactions",
+            buildJsonObject {
+                put("user_id", userId)
+                put("kind", "grant")
+                put("credits", credits)
+            }.toString(),
+            prefer = "return=minimal",
+        )
+        return balance
     }
 
     override fun walletBalance(firebaseUid: String): Int? {
         return try {
-            val saved = get("app_users?firebase_uid=eq.${encode(firebaseUid)}&select=wallet_balance")
-            val rows = Json.parseToJsonElement(saved).jsonArray
-            if (rows.isEmpty()) return 0
-            rows.first().jsonObject["wallet_balance"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+            savedWallet("app_users?firebase_uid=eq.${encode(firebaseUid)}") ?: 0
         } catch (error: Exception) {
             System.err.println("Supabase wallet lookup failed for rider $firebaseUid: ${error.message}")
             null
         }
+    }
+
+    override fun portalPhone(firebaseUid: String): String? {
+        val saved = get("app_users?firebase_uid=eq.${encode(firebaseUid)}&select=phone")
+        return Json.parseToJsonElement(saved).jsonArray.firstOrNull()?.jsonObject?.get("phone").textOrNull()
+    }
+
+    /** Null when no row matches. Supabase sends the balance as 62.00, so it is read as a decimal. */
+    private fun savedWallet(filter: String): Int? {
+        val rows = Json.parseToJsonElement(get("$filter&select=wallet_balance")).jsonArray
+        if (rows.isEmpty()) return null
+        return rows.first().jsonObject["wallet_balance"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toInt() ?: 0
+    }
+
+    private fun saveWallet(filter: String, credits: Int): Int {
+        val balance = credits.coerceIn(0, 1_000_000)
+        send(filter, """{"wallet_balance":$balance}""", prefer = "return=minimal", method = "PATCH")
+        return balance
     }
 
     override fun removeRider(userId: String): RemovedRider? {
@@ -400,8 +452,9 @@ class SupabaseRiderSync(
         val row = buildJsonObject {
             put("firebase_uid", rider.id)
             put("name", rider.displayName?.takeIf { it.isNotBlank() } ?: rider.email ?: "Rider")
-            put("phone", rider.phoneNumber)
-            put("email", rider.email)
+            // A missing number or email here must not blank the one already saved in the portal.
+            if (!rider.phoneNumber.isNullOrBlank()) put("phone", rider.phoneNumber)
+            if (!rider.email.isNullOrBlank()) put("email", rider.email)
             put("sign_in_provider", rider.signInProvider)
             // Leave the stored platform alone when this request didn't say.
             if (platform != null) put("platform", platform)

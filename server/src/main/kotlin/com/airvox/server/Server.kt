@@ -23,7 +23,6 @@ import io.ktor.server.routing.routing
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Properties
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -38,16 +37,18 @@ private val apiJson = Json {
 fun Application.airvoxApi(
     verifier: IdTokenVerifier,
     store: RiderStore,
-    sync: RiderSync = NoRiderSync,
+    sync: RiderSync = LocalRiderSync(),
     staff: StaffGate = StaffGate { false },
     accounts: AccountDeleter = AccountDeleter { false },
+    staffAccounts: StaffAccounts = NoStaffAccounts,
 ) {
-    // Phones that already reported a real balance. A later 0 from those phones is a real spend.
-    val phonesHoldingCredits = ConcurrentHashMap.newKeySet<String>()
+    // The wallet is read, changed and saved in steps. One change at a time keeps two requests from losing credits.
+    val walletGate = Any()
     install(ContentNegotiation) { json(apiJson) }
     install(CORS) {
         allowMethod(HttpMethod.Delete)
         allowHeader(HttpHeaders.Authorization)
+        allowHeader(HttpHeaders.ContentType)
         allowHost("127.0.0.1:5180", schemes = listOf("http"))
         allowHost("localhost:5180", schemes = listOf("http"))
     }
@@ -84,19 +85,19 @@ fun Application.airvoxApi(
             val saved = store.upsert(identity)
             // Look up the portal account before copying this sign-in, or an old rider looks new.
             val known = runCatching { sync.existingAccount(identity.uid) }.getOrNull()
-            val welcome = welcomeCreditsFor(store, sync, identity.uid, known)
-            if (welcome > 0) sync.recordCredits(saved.rider, "grant", welcome)
-            val rider = if (known == true) store.acceptReturningRider(identity.uid) ?: saved.rider else saved.rider
+            val welcome = synchronized(walletGate) { grantWelcome(store, sync, saved, known) }
+            val rider = if (known == true) {
+                val portalPhone = if (saved.rider.phoneNumber.isNullOrBlank()) {
+                    runCatching { sync.portalPhone(identity.uid) }.getOrNull()
+                } else {
+                    null
+                }
+                store.acceptReturningRider(identity.uid, portalPhone) ?: saved.rider
+            } else {
+                saved.rider
+            }
             sync.riderSeen(rider, call.platform())
-            call.respond(
-                RiderResponse(
-                    rider,
-                    welcomeCredits = welcome,
-                    balanceOffset = store.balanceOffset(identity.uid),
-                    walletBalance = runCatching { sync.walletBalance(identity.uid) }.getOrNull() ?: 0,
-                    sessionId = saved.sessionId,
-                ),
-            )
+            call.respond(RiderResponse(rider, welcomeCredits = welcome, sessionId = saved.sessionId))
         }
         // The app calls this while it is open. A mismatched session means a newer phone signed in.
         post("/v1/heartbeat") {
@@ -115,19 +116,9 @@ fun Application.airvoxApi(
                 )
             } else {
                 val body = runCatching { call.receive<HeartbeatBody>() }.getOrNull()
-                val credits = body?.credits ?: -1
                 sync.riderSeen(rider, call.platform())
-                if (credits in 0..1_000_000) {
-                    val stored = runCatching { sync.walletBalance(identity.uid) }.getOrNull()
-                    // A phone that just signed in, or that could not reach the server, still has 0
-                    // until it loads the saved wallet. That 0 must not wipe the portal balance.
-                    val emptyPhone = credits == 0 &&
-                        (stored == null || stored > 0) &&
-                        identity.uid !in phonesHoldingCredits
-                    if (credits > 0) phonesHoldingCredits.add(identity.uid)
-                    if (!emptyPhone) {
-                        sync.setWallet(rider, store.walletToStore(identity.uid, credits, body?.clearOffset == true))
-                    }
+                val wallet = synchronized(walletGate) {
+                    settleWallet(store, sync, rider, body?.install.orEmpty(), body?.spent ?: -1)
                 }
                 val room = normalizeRoom(body?.room)
                 val mode = normalizeMode(body?.mode)
@@ -138,7 +129,8 @@ fun Application.airvoxApi(
                     runCatching { sync.closeStaleChannels() }
                         .onFailure { error -> System.err.println("Channel check-in failed: ${error.message}") }
                 }
-                call.respond(HttpStatusCode.NoContent)
+                // No wallet in the reply means Supabase could not be reached. The phone keeps its own count.
+                if (wallet == null) call.respond(HttpStatusCode.NoContent) else call.respond(wallet)
             }
         }
         get("/v1/me") {
@@ -166,7 +158,7 @@ fun Application.airvoxApi(
                 )
                 return@patch
             }
-            store.upsert(identity)
+            store.upsert(identity, newSession = false)
             val rider = if (body.completeProfile) {
                 val phone = normalizePhone(body.phoneNumber)
                 if (phone == null) {
@@ -275,16 +267,105 @@ fun Application.airvoxApi(
                 return@post
             }
             val body = call.receive<CreditBody>()
-            val allowed = body.kind == "consume" || body.kind == "purchase" || body.kind == "grant"
-            if (!allowed || body.credits !in 1..10_000) {
+            // Credits used are counted from the heartbeat, so a phone can only add a pack here.
+            if (body.kind != "purchase" || body.credits !in 1..10_000) {
                 call.respond(
                     HttpStatusCode.BadRequest,
-                    ApiError("invalid_credits", "Send a credit use or a credit pack."),
+                    ApiError("invalid_credits", "Send a credit pack."),
                 )
                 return@post
             }
-            sync.recordCredits(rider, body.kind, body.credits)
-            call.respond(HttpStatusCode.NoContent)
+            val balance = synchronized(walletGate) { sync.changeWallet(rider, body.credits) }
+            if (balance == null) {
+                call.respond(
+                    HttpStatusCode.ServiceUnavailable,
+                    ApiError("wallet_unavailable", "Couldn't add these credits. Try again."),
+                )
+                return@post
+            }
+            sync.recordCredits(rider, "purchase", body.credits)
+            call.respond(WalletResponse(balance))
+        }
+        post("/v1/riders/{id}/credits") {
+            if (!staff.allow(call.requireToken())) {
+                call.respond(
+                    HttpStatusCode.Forbidden,
+                    ApiError("not_staff", "Your account isn't allowed to add credits."),
+                )
+                return@post
+            }
+            val id = call.parameters["id"].orEmpty()
+            val credits = runCatching { call.receive<AddCreditsBody>() }.getOrNull()?.credits ?: 0
+            if (!RIDER_ID.matches(id) || credits !in 1..10_000) {
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    ApiError("invalid_credits", "Send a rider and 1 to 10,000 credits."),
+                )
+                return@post
+            }
+            val balance = try {
+                synchronized(walletGate) { sync.addCredits(id, credits) }
+            } catch (error: Exception) {
+                System.err.println("Adding credits failed: ${error.message}")
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    ApiError("credits_failed", "Couldn't add these credits. Try again."),
+                )
+                return@post
+            }
+            if (balance == null) {
+                call.respond(HttpStatusCode.NotFound, ApiError("unknown_rider", "That rider is gone."))
+                return@post
+            }
+            call.respond(WalletResponse(balance))
+        }
+        get("/v1/staff") {
+            if (!staff.allow(call.requireToken())) {
+                call.respond(
+                    HttpStatusCode.Forbidden,
+                    ApiError("not_staff", "Your account isn't allowed to see portal accounts."),
+                )
+                return@get
+            }
+            try {
+                call.respond(StaffListResponse(staffAccounts.list()))
+            } catch (error: Exception) {
+                System.err.println("Portal account list failed: ${error.message}")
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    ApiError("staff_failed", "Couldn't load the portal accounts. Try again."),
+                )
+            }
+        }
+        post("/v1/staff") {
+            if (!staff.allow(call.requireToken())) {
+                call.respond(
+                    HttpStatusCode.Forbidden,
+                    ApiError("not_staff", "Your account isn't allowed to create portal accounts."),
+                )
+                return@post
+            }
+            val body = runCatching { call.receive<StaffBody>() }.getOrNull()
+            val email = body?.email?.trim()?.lowercase().orEmpty()
+            val password = body?.password.orEmpty()
+            if (!STAFF_EMAIL.matches(email) || email.length > 254 || password.length !in 6..72) {
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    ApiError("invalid_staff", "Send an email and a password of 6 to 72 characters."),
+                )
+                return@post
+            }
+            try {
+                call.respond(HttpStatusCode.Created, staffAccounts.create(email, password))
+            } catch (error: StaffAccountRefused) {
+                call.respond(HttpStatusCode.Conflict, ApiError("staff_refused", error.message ?: "Couldn't create this account."))
+            } catch (error: Exception) {
+                System.err.println("Portal account create failed: ${error.message}")
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    ApiError("staff_failed", "Couldn't create this account. Try again."),
+                )
+            }
         }
         delete("/v1/session") {
             val identity = verifier.verify(call.requireToken())
@@ -327,6 +408,8 @@ fun Application.airvoxApi(
     }
 }
 
+private val STAFF_EMAIL = Regex("""^[^\s@]+@[^\s@]+\.[^\s@]+$""")
+
 private val RIDER_ID = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 private suspend fun ApplicationCall.stopIfDeleted(store: RiderStore, uid: String): Boolean {
@@ -340,24 +423,48 @@ private fun readWelcomeCredits(sync: RiderSync): Int {
 }
 
 /**
- * 20 only when this Firebase account has never been stored.
+ * Puts the free credits in the wallet of an account that has never been stored, and returns how many.
  * An old account stays at 0 even if the local rider file was recreated.
- * A failed lookup grants nothing and is tried again on the next sign-in.
+ * When Supabase can't be reached the grant stays owed, and the next sign-in gives it.
  */
-private fun welcomeCreditsFor(store: RiderStore, sync: RiderSync, uid: String, known: Boolean?): Int {
-    if (store.welcomeGranted(uid)) return 0
-    return when (known) {
-        true -> {
-            store.markWelcomeGranted(uid)
-            0
-        }
-        false -> {
-            val amount = readWelcomeCredits(sync)
-            store.markWelcomeGranted(uid)
-            amount
-        }
-        null -> 0
+private fun grantWelcome(store: RiderStore, sync: RiderSync, saved: UpsertedRider, known: Boolean?): Int {
+    val uid = saved.rider.id
+    val owed = store.welcomeOwed(uid)
+    if (store.welcomeGranted(uid) && !owed) return 0
+    if (!owed && known == true) {
+        store.markWelcomeGranted(uid)
+        return 0
     }
+    if (!owed && known == null) {
+        // The copy made after this sign-in will make the account look old next time.
+        if (saved.created) store.markWelcomeOwed(uid)
+        return 0
+    }
+    val amount = readWelcomeCredits(sync)
+    if (amount > 0) {
+        if (sync.changeWallet(saved.rider, amount) == null) {
+            store.markWelcomeOwed(uid)
+            return 0
+        }
+        sync.recordCredits(saved.rider, "grant", amount)
+    }
+    store.markWelcomeGranted(uid)
+    return amount
+}
+
+/**
+ * Takes the credits this install used since the last check-in off the wallet, and returns what is left.
+ * Null when Supabase could not be reached. Nothing is counted then, so the next check-in sends it again.
+ */
+private fun settleWallet(store: RiderStore, sync: RiderSync, rider: Rider, install: String, spent: Int): WalletResponse? {
+    val counting = install.length in 8..64 && spent in 0..10_000_000
+    val used = if (counting) store.spendSince(rider.id, install, spent) else 0
+    val balance = runCatching {
+        if (used > 0) sync.changeWallet(rider, -used) else sync.walletBalance(rider.id)
+    }.getOrNull() ?: return null
+    if (counting) store.countSpent(rider.id, install, spent)
+    if (used > 0) sync.recordCredits(rider, "consume", used)
+    return WalletResponse(balance, if (counting) spent else -1)
 }
 
 private fun normalizeRoom(value: String?): String? {
@@ -425,12 +532,17 @@ fun main() {
         SupabaseRiderSync(supabaseUrl, supabaseKey)
     } else {
         println("Riders stay in $data only. Set supabase.url and supabase.service.role.key in local.properties to copy them to Supabase.")
-        NoRiderSync
+        LocalRiderSync()
     }
     val staff = if (supabaseUrl != null && supabaseKey != null && anonKey != null) {
         SupabaseStaffGate(supabaseUrl, anonKey, supabaseKey)
     } else {
         StaffGate { false }
+    }
+    val staffAccounts = if (supabaseUrl != null && supabaseKey != null) {
+        SupabaseStaffAccounts(supabaseUrl, supabaseKey)
+    } else {
+        NoStaffAccounts
     }
     val serviceAccount = setting("FIREBASE_SERVICE_ACCOUNT", "firebase.service.account")?.let { path ->
         val file = Path.of(path)
@@ -442,7 +554,7 @@ fun main() {
     val accounts = FirebaseAccountDeleter(projectId, setting("FIREBASE_API_KEY", "firebase.api.key"), serviceAccount)
     println("Airvox API on http://0.0.0.0:$port (emulator: http://10.0.2.2:$port), project $projectId")
     embeddedServer(Netty, host = "0.0.0.0", port = port) {
-        airvoxApi(verifier, store, sync, staff, accounts)
+        airvoxApi(verifier, store, sync, staff, accounts, staffAccounts)
     }.start(wait = true)
 }
 

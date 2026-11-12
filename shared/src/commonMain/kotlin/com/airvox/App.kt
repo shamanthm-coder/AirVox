@@ -33,8 +33,6 @@ fun App(
     auth: AuthClient = UnavailableAuthClient(),
     wallet: CreditWallet = CreditWallet(),
     bindWallet: (String) -> Unit = {},
-    offsetAlreadyRemoved: (String, Int) -> Boolean = { _, _ -> false },
-    markOffsetRemoved: (String, Int) -> Unit = { _, _ -> },
 ) {
     AirvoxTheme {
         AirvoxApp(
@@ -48,8 +46,6 @@ fun App(
             auth = auth,
             wallet = wallet,
             bindWallet = bindWallet,
-            offsetAlreadyRemoved = offsetAlreadyRemoved,
-            markOffsetRemoved = markOffsetRemoved,
         )
     }
 }

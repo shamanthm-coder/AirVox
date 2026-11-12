@@ -18,15 +18,8 @@ data class Rider(
 @Serializable
 data class RiderResponse(
     val rider: Rider,
-    /** 20 the first time this account signs in, otherwise 0. */
+    /** Free credits added to the wallet on this account's first sign-in, otherwise 0. */
     val welcomeCredits: Int = 0,
-    /**
-     * Credits to take back off the phone. Set when a welcome grant was given again
-     * to an account that already had one. Stays until the phone confirms it.
-     */
-    val balanceOffset: Int = 0,
-    /** Credits saved in the portal. The phone uses this when its own wallet is empty. */
-    val walletBalance: Int = 0,
     /** This sign-in. An older phone still holding the previous id is signed out. */
     val sessionId: String = "",
 )
@@ -53,12 +46,33 @@ data class PlansResponse(val plans: List<PlanOffer>)
 
 @Serializable
 data class HeartbeatBody(
-    val credits: Int = -1,
+    /** A random id this app install made for its wallet. */
+    val install: String = "",
+    /** Every credit this install has ever used. It only goes up, so sending it twice costs nothing. */
+    val spent: Int = -1,
     val room: String = "",
     val mode: String = "",
-    /** The phone has already removed [RiderResponse.balanceOffset] from its wallet. */
-    val clearOffset: Boolean = false,
 )
+
+/**
+ * The wallet kept in Supabase. [spentCounted] is the [HeartbeatBody.spent] already taken off it,
+ * or -1 when the phone did not send one.
+ */
+@Serializable
+data class WalletResponse(val walletBalance: Int, val spentCounted: Int = -1)
+
+@Serializable
+data class AddCreditsBody(val credits: Int = 0)
+
+@Serializable
+data class StaffBody(val email: String = "", val password: String = "")
+
+/** Someone who can sign in to the portal. */
+@Serializable
+data class StaffAccount(val email: String, val role: String, val createdAt: String? = null)
+
+@Serializable
+data class StaffListResponse(val staff: List<StaffAccount>)
 
 @Serializable
 data class ChannelBody(
@@ -98,8 +112,10 @@ internal data class StoredRider(
     val profileComplete: Boolean = false,
     /** True after the one welcome grant was decided, so a rebuilt local file cannot grant it again. */
     val welcomeGranted: Boolean = false,
-    /** Subtracted from the balance the phone reports, until the phone confirms it removed the same amount. */
-    val balanceOffset: Int = 0,
+    /** The welcome grant could not be saved yet. The next sign-in gives it. */
+    val welcomeOwed: Boolean = false,
+    /** Credits already taken off the wallet, for each app install. */
+    val spentSeen: Map<String, Int> = emptyMap(),
     val signInProvider: String,
     val providers: List<String> = emptyList(),
     /** The phone that last called POST /v1/session. Empty until the first sign-in after this was added. */
@@ -114,7 +130,8 @@ internal data class StoredRider(
         displayName = displayName,
         signInProvider = signInProvider,
         providers = providers,
-        profileComplete = profileComplete,
+        // A profile without a mobile number is not finished, whatever was stored before.
+        profileComplete = profileComplete && !phoneNumber.isNullOrBlank(),
         createdAt = createdAt,
         lastSeenAt = lastSeenAt,
     )

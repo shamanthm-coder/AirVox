@@ -6,8 +6,6 @@ import androidx.compose.ui.window.ComposeUIViewController
 import com.airvox.auth.IosAuthClient
 import com.airvox.credits.CreditWallet
 import com.airvox.credits.bindUserCredits
-import com.airvox.credits.markOffsetRemoved
-import com.airvox.credits.offsetAlreadyRemoved
 import com.airvox.intercom.IosIntercomSession
 import com.airvox.intercom.IosVoiceCall
 import com.airvox.location.IosPlaceReporter
@@ -39,7 +37,5 @@ fun MainViewController(voice: IosVoiceCall, playback: IosSystemPlayback) = Compo
         auth = auth,
         wallet = wallet,
         bindWallet = { userId -> bindUserCredits(wallet, userId) },
-        offsetAlreadyRemoved = { userId, offset -> offsetAlreadyRemoved(userId, offset) },
-        markOffsetRemoved = { userId, offset -> markOffsetRemoved(userId, offset) },
     )
 }

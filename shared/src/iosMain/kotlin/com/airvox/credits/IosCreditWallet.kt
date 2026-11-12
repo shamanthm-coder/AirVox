@@ -7,21 +7,12 @@ fun bindUserCredits(wallet: CreditWallet, userId: String) {
     val store = NSUserDefaults.standardUserDefaults
     val key = "airvox.credits.$userId"
     val balance = read(store.stringForKey(key))
-    wallet.bind(balance) { next ->
+    val installKey = "airvox.install.$userId"
+    val install = store.stringForKey(installKey) ?: newWalletInstall().also { store.setObject(it, installKey) }
+    wallet.bind(balance, install) { next ->
         store.setObject("${next.credits},${next.spent},${next.minutesUsed}", key)
     }
 }
-
-fun offsetAlreadyRemoved(userId: String, offset: Int): Boolean {
-    val stored = NSUserDefaults.standardUserDefaults.stringForKey(offsetKey(userId))
-    return stored == offset.toString()
-}
-
-fun markOffsetRemoved(userId: String, offset: Int) {
-    NSUserDefaults.standardUserDefaults.setObject(offset.toString(), offsetKey(userId))
-}
-
-private fun offsetKey(userId: String) = "airvox.offset.$userId"
 
 private fun read(raw: String?): CreditBalance {
     val parts = raw?.split(',') ?: return CreditBalance()

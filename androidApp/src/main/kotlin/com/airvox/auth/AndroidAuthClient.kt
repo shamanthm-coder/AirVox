@@ -265,22 +265,26 @@ class AndroidAuthClient(
         }
     }
 
-    override fun recordCredits(kind: String, credits: Int) {
-        val user = firebase?.currentUser ?: return
-        if (_state.value.account == null) return
+    override fun buyCredits(credits: Int, onResult: (Boolean) -> Unit) {
+        val user = firebase?.currentUser
+        if (user == null || _state.value.account == null) {
+            onResult(false)
+            return
+        }
         scope.launch {
-            runCatching {
-                val token = user.getIdToken(false).await().token ?: return@launch
+            val saved = runCatching {
+                val token = user.getIdToken(false).await().token ?: return@runCatching false
                 withContext(Dispatchers.IO) {
-                    val body = JSONObject().put("kind", kind).put("credits", credits)
+                    val body = JSONObject().put("kind", "purchase").put("credits", credits)
                     val request = Request.Builder()
                         .url("$baseUrl/v1/credits")
                         .header("Authorization", "Bearer $token")
                         .post(body.toString().toRequestBody(jsonType))
                         .build()
-                    http.newCall(request).execute().close()
+                    http.newCall(request).execute().use { it.isSuccessful }
                 }
-            }
+            }.getOrDefault(false)
+            onResult(saved)
         }
     }
 
@@ -301,29 +305,34 @@ class AndroidAuthClient(
         scope.launch { flushChannels() }
     }
 
-    override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
+    override fun heartbeat(install: String, spent: Int, room: String, mode: String) {
         val user = firebase?.currentUser ?: return
-        if (_state.value.account == null || _state.value.signedInElsewhere) return
+        val riderId = _state.value.account?.id ?: return
+        if (_state.value.signedInElsewhere) return
         scope.launch {
             flushChannels()
-            val rejected = runCatching {
+            val reply = runCatching {
                 val token = user.getIdToken(false).await().token ?: return@runCatching null
-                withContext(Dispatchers.IO) {
-                    rejectedSession(token, credits, room, mode, clearOffset)
+                withContext(Dispatchers.IO) { checkIn(token, install, spent, room, mode) }
+            }.getOrNull() ?: return@launch
+            if (reply.rejected != null) {
+                if (noticeOtherSignIn && readSession() == reply.rejected && _state.value.account != null) {
+                    update { it.copy(signedInElsewhere = true) }
                 }
-            }.getOrNull()
-            if (rejected != null && noticeOtherSignIn && readSession() == rejected && _state.value.account != null) {
-                update { it.copy(signedInElsewhere = true) }
+            } else if (reply.wallet != null && _state.value.account?.id == riderId) {
+                update { it.copy(wallet = reply.wallet) }
             }
         }
     }
 
-    /** The session id this phone sent, when the server says a newer phone signed in. */
-    private fun rejectedSession(token: String, credits: Int, room: String, mode: String, clearOffset: Boolean): String? {
+    /** [rejected] is the session id this phone sent, when the server says a newer phone signed in. */
+    private class CheckIn(val rejected: String? = null, val wallet: ServerWallet? = null)
+
+    private fun checkIn(token: String, install: String, spent: Int, room: String, mode: String): CheckIn? {
         val sent = readSession()
         if (sent.isEmpty()) return null
-        val body = JSONObject().put("credits", credits)
-        if (clearOffset) body.put("clearOffset", true)
+        val body = JSONObject()
+        if (install.isNotEmpty()) body.put("install", install).put("spent", spent)
         val channel = normalizeChannel(room, mode)
         if (channel != null) {
             body.put("room", channel.first).put("mode", channel.second)
@@ -337,11 +346,18 @@ class AndroidAuthClient(
             .build()
         return try {
             http.newCall(request).execute().use { response ->
-                if (response.code != 409) return null
                 val text = response.body?.string().orEmpty()
-                if ("signed_in_elsewhere" in text && readSession() == sent) sent else null
+                if (response.code == 409) {
+                    return if ("signed_in_elsewhere" in text && readSession() == sent) CheckIn(rejected = sent) else null
+                }
+                if (response.code != 200) return null
+                val wallet = JSONObject(text)
+                if (!wallet.has("walletBalance") || wallet.optInt("spentCounted", -1) < 0) return null
+                CheckIn(wallet = ServerWallet(wallet.getInt("walletBalance"), wallet.getInt("spentCounted")))
             }
         } catch (_: IOException) {
+            null
+        } catch (_: org.json.JSONException) {
             null
         }
     }
@@ -477,13 +493,7 @@ class AndroidAuthClient(
                 if (name.isNullOrEmpty()) {
                     created
                 } else {
-                    // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
                     patchProfile(token, name, phone = null, complete = false)
-                        .copy(
-                            welcomeCredits = created.welcomeCredits,
-                            balanceOffset = created.balanceOffset,
-                            walletBalance = created.walletBalance,
-                        )
                 }
             }
             val warning = withContext(Dispatchers.IO) { rememberRider(user, rider, profileSaved = false) }
@@ -494,7 +504,8 @@ class AndroidAuthClient(
                     account = rider,
                     busy = false,
                     error = warning,
-                    needsProfile = needsProfile && !rider.profileComplete,
+                    // The server says when a mobile number is still missing, for old accounts too.
+                    needsProfile = !rider.profileComplete,
                     signedInElsewhere = false,
                 )
             }
@@ -530,7 +541,7 @@ class AndroidAuthClient(
         val cached = readAccount()?.takeIf { it.id == user.uid }
         val name = displayName?.trim()?.takeIf { it.isNotEmpty() }
         if (cached != null) {
-            return cached.copy(displayName = name ?: cached.displayName, welcomeCredits = 0)
+            return cached.copy(displayName = name ?: cached.displayName)
         }
         val providers = user.providerData.mapNotNull { it.providerId }.filter { it.isNotBlank() && it != "firebase" }
         val keptName = name ?: user.displayName?.takeIf { it.isNotBlank() }
@@ -542,8 +553,6 @@ class AndroidAuthClient(
             signInProvider = providers.firstOrNull() ?: "password",
             providers = providers.ifEmpty { listOf("password") },
             profileComplete = !keptName.isNullOrBlank(),
-            welcomeCredits = 0,
-            balanceOffset = 0,
         )
     }
 
@@ -567,9 +576,6 @@ class AndroidAuthClient(
             .put("id", rider.id)
             .put("signInProvider", rider.signInProvider)
             .put("profileComplete", rider.profileComplete)
-            .put("welcomeCredits", rider.welcomeCredits)
-            .put("balanceOffset", rider.balanceOffset)
-            .put("walletBalance", rider.walletBalance)
             .put("providers", JSONArray(rider.providers))
         json.putNullable("phoneNumber", rider.phoneNumber)
         json.putNullable("email", rider.email)
@@ -590,9 +596,6 @@ class AndroidAuthClient(
             signInProvider = rider.optString("signInProvider"),
             providers = rider.optJSONArray("providers").toList(),
             profileComplete = rider.optBoolean("profileComplete", false),
-            welcomeCredits = rider.optInt("welcomeCredits", 0),
-            balanceOffset = rider.optInt("balanceOffset", 0),
-            walletBalance = rider.optInt("walletBalance", 0),
         )
     }
 
@@ -706,7 +709,10 @@ class AndroidAuthClient(
     }
 
     private fun update(block: (AuthState) -> AuthState) {
-        val next = block(_state.value)
+        val before = _state.value
+        val changed = block(before)
+        // One rider's balance must never show on the next rider's account.
+        val next = if (changed.account?.id != before.account?.id) changed.copy(wallet = null) else changed
         _state.value = next.copy(
             pendingSession = firebase?.currentUser != null && next.account == null,
             configured = firebase != null && next.phase != AuthPhase.Restoring || next.configured,
@@ -741,9 +747,6 @@ private fun parseRider(body: String): RiderAccount {
         signInProvider = rider.getString("signInProvider"),
         providers = rider.optJSONArray("providers").toList(),
         profileComplete = rider.optBoolean("profileComplete", false),
-        welcomeCredits = root.optInt("welcomeCredits", 0),
-        balanceOffset = root.optInt("balanceOffset", 0),
-        walletBalance = root.optInt("walletBalance", 0),
     )
 }
 
