@@ -47,6 +47,8 @@ class LanChannel(
     private val wifi = appContext.getSystemService(WifiManager::class.java)
     private val nsd = appContext.getSystemService(NsdManager::class.java)
     private val pool = Executors.newCachedThreadPool()
+    // Android refuses network writes on the main thread, and Talk is pressed there. One thread keeps the order.
+    private val sender = Executors.newSingleThreadExecutor()
     private val running = AtomicBoolean(false)
     private val sockets = ConcurrentHashMap<String, Socket>()
     private val names = ConcurrentHashMap<String, String>()
@@ -108,7 +110,9 @@ class LanChannel(
         val next = name.trim().take(40)
         if (next.isBlank() || !running.get()) return
         selfName = next
-        sockets.forEach { (id, socket) -> writeHello(socket, id) }
+        if (!sender.isShutdown) sender.execute {
+            sockets.forEach { (id, socket) -> runCatching { writeHello(socket, id) } }
+        }
         publish()
     }
 
@@ -121,11 +125,17 @@ class LanChannel(
             listOfNotNull(sockets[to])
         }
         val bytes = (body.toString() + "\n").toByteArray(Charsets.UTF_8)
-        targets.forEach { socket ->
-            runCatching {
-                synchronized(socket) {
-                    socket.getOutputStream().write(bytes)
-                    socket.getOutputStream().flush()
+        val kind = body.optString("kind")
+        if (sender.isShutdown) return
+        sender.execute {
+            targets.forEach { socket ->
+                runCatching {
+                    synchronized(socket) {
+                        socket.getOutputStream().write(bytes)
+                        socket.getOutputStream().flush()
+                    }
+                }.onFailure { error ->
+                    Log.w(TAG, "Could not send $kind: $error")
                 }
             }
         }
@@ -133,6 +143,9 @@ class LanChannel(
 
     fun close() {
         if (!running.getAndSet(false) && server == null && udp == null) return
+        // Let a goodbye that is already queued reach the other phone before the sockets close.
+        sender.shutdown()
+        runCatching { sender.awaitTermination(300, TimeUnit.MILLISECONDS) }
         sockets.values.toList().forEach { runCatching { it.close() } }
         sockets.clear()
         runCatching { server?.close() }
@@ -144,6 +157,7 @@ class LanChannel(
             if (lock?.isHeld == true) lock?.release()
         }
         lock = null
+        sender.shutdownNow()
         pool.shutdownNow()
     }
 
@@ -233,9 +247,10 @@ class LanChannel(
                     socket.close()
                     return@execute
                 }
-                sockets[from] = socket
+                // The link counts only once the other phone answers. Two attempts can be open at
+                // the same moment, and the other phone keeps one and closes the other.
+                socket.soTimeout = 3000
                 writeHello(socket, from)
-                publish()
                 readLoop(socket, announced = true)
             } catch (error: Exception) {
                 Log.w(TAG, "Could not reach $from: ${error.message}")
@@ -264,7 +279,11 @@ class LanChannel(
                 }
                 if (from.isNotBlank() && peer == null) {
                     val keep = if (selfId > from) announced else !announced
-                    if (!keep) break
+                    if (!keep) {
+                        // That phone found this one first, but this side has to open the link. Call it back.
+                        if (!announced) socket.inetAddress?.let { dial(from, it, TCP_PORT) }
+                        break
+                    }
                     peer = from
                     names[from] = incomingName.ifBlank { names[from] ?: "Phone" }
                     val existing = sockets.putIfAbsent(from, socket)
@@ -335,7 +354,9 @@ class LanChannel(
     private fun scanLoop() {
         while (running.get()) {
             val hosts = candidateHosts()
-            hosts.chunked(40).forEach { batch ->
+            // A few at a time. Every probe of an empty address is a Wi-Fi broadcast, and a burst of
+            // them fills the hotspot's send queue so that real traffic to the other phone is dropped.
+            hosts.chunked(8).forEach { batch ->
                 if (!running.get()) return
                 val latch = CountDownLatch(batch.size)
                 batch.forEach { host ->
@@ -350,7 +371,7 @@ class LanChannel(
                 latch.await(3, TimeUnit.SECONDS)
             }
             try {
-                Thread.sleep(if (sockets.isEmpty()) 1000 else 4000)
+                Thread.sleep(if (sockets.isEmpty()) 2000 else 15000)
             } catch (_: InterruptedException) {
                 break
             }
@@ -379,11 +400,14 @@ class LanChannel(
 
     private fun candidateHosts(): List<String> {
         val hosts = linkedSetOf<String>()
+        // Only search the Wi-Fi this phone has joined. When this phone is the hotspot, the phones
+        // that joined it search for this one, and searching from here only floods the hotspot.
+        val joined = joinedWifiAddress() ?: return emptyList()
         runCatching {
             NetworkInterface.getNetworkInterfaces().asSequence().forEach { nif ->
                 if (!nif.isUp || nif.isLoopback || !isWifi(nif.name.orEmpty())) return@forEach
                 nif.inetAddresses.asSequence().filterIsInstance<Inet4Address>().forEach { addr ->
-                    if (!isPrivate(addr)) return@forEach
+                    if (!isPrivate(addr) || addr.hostAddress != joined) return@forEach
                     val text = addr.hostAddress ?: return@forEach
                     val prefix = text.substringBeforeLast('.')
                     val self = text.substringAfterLast('.').toIntOrNull() ?: return@forEach
@@ -394,6 +418,14 @@ class LanChannel(
             }
         }
         return hosts.toList()
+    }
+
+    /** This phone's address on a Wi-Fi it joined as a client. Null when it has joined none. */
+    @Suppress("DEPRECATION")
+    private fun joinedWifiAddress(): String? {
+        val raw = runCatching { wifi?.connectionInfo?.ipAddress }.getOrNull() ?: return null
+        if (raw == 0) return null
+        return "${raw and 0xFF}.${(raw shr 8) and 0xFF}.${(raw shr 16) and 0xFF}.${(raw shr 24) and 0xFF}"
     }
 
     private fun isWifi(name: String): Boolean {

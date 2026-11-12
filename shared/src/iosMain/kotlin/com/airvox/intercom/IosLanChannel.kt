@@ -1,6 +1,7 @@
 package com.airvox.intercom
 
 import kotlin.concurrent.Volatile
+import kotlinx.cinterop.CPointerVar
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.UIntVar
@@ -8,11 +9,13 @@ import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.convert
 import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.pointed
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.get
 import kotlinx.cinterop.sizeOf
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import kotlinx.serialization.json.Json
@@ -32,6 +35,8 @@ import platform.darwin.dispatch_time
 import platform.darwin.dispatch_after
 import platform.darwin.DISPATCH_TIME_NOW
 import platform.posix.AF_INET
+import platform.posix.IFF_LOOPBACK
+import platform.posix.IFF_UP
 import platform.posix.INADDR_ANY
 import platform.posix.IPPROTO_TCP
 import platform.posix.SOCK_DGRAM
@@ -55,7 +60,11 @@ import platform.posix.pollfd
 import platform.posix.sleep
 import platform.posix.close
 import platform.posix.connect
+import platform.darwin.freeifaddrs
+import platform.darwin.getifaddrs
+import platform.posix.getpeername
 import platform.posix.getsockname
+import platform.darwin.ifaddrs
 import platform.posix.listen
 import platform.posix.memset
 import platform.posix.recv
@@ -153,6 +162,9 @@ internal class IosLanChannel(
             val fd = platform.posix.accept(listening, null, null)
             if (fd < 0) continue
             prepareStream(fd)
+            // An accepted socket copies the listener's one-second wait. Left on, the link to the
+            // other phone is dropped whenever nobody sends anything for a second.
+            receiveTimeout(fd, seconds = 0)
             background { readLoop(fd, known = null, outbound = false) }
         }
     }
@@ -249,16 +261,23 @@ internal class IosLanChannel(
                 }
             }
             gate.lock()
-            dialing.remove(from)
             val keep = opened && running && !links.containsKey(from)
-            if (keep) links[from] = fd
             gate.unlock()
             if (!keep) {
+                gate.lock()
+                dialing.remove(from)
+                gate.unlock()
                 if (fd >= 0) close(fd)
                 return@background
             }
+            // The link counts only once the other phone answers. Two attempts can be open at
+            // the same moment, and the other phone keeps one and closes the other.
+            receiveTimeout(fd, seconds = 3)
             writeHello(fd, from)
-            readLoop(fd, known = from, outbound = true)
+            readLoop(fd, known = null, outbound = true)
+            gate.lock()
+            dialing.remove(from)
+            gate.unlock()
         }
     }
 
@@ -287,7 +306,11 @@ internal class IosLanChannel(
                 if (foundRoom.isNotBlank() && foundRoom != room) break
                 if (from.isNotBlank() && peer == null) {
                     val keepSocket = if (selfId > from) outbound else !outbound
-                    if (!keepSocket) break
+                    if (!keepSocket) {
+                        // That phone found this one first, but this side has to open the link. Call it back.
+                        if (!outbound) peerAddress(fd)?.let { dial(from, it, TCP_PORT) }
+                        break
+                    }
                     peer = from
                     gate.lock()
                     val existing = links[from]
@@ -298,6 +321,7 @@ internal class IosLanChannel(
                         peer = null
                         break
                     }
+                    receiveTimeout(fd, seconds = 0)
                     if (!outbound) writeHello(fd, from)
                 }
                 if (message.string("kind") == "beacon") continue
@@ -312,6 +336,14 @@ internal class IosLanChannel(
         if (current == fd) links.remove(id)
         gate.unlock()
         if (current == fd) onLost(id)
+    }
+
+    private fun peerAddress(fd: Int): UInt? = memScoped {
+        val remote = alloc<sockaddr_in>()
+        val length = alloc<UIntVar>()
+        length.value = sizeOf<sockaddr_in>().convert()
+        if (getpeername(fd, remote.ptr.reinterpret(), length.ptr) != 0) return null
+        remote.sin_addr.s_addr.takeIf { it != 0u }
     }
 
     private fun writeHello(fd: Int, to: String) {
@@ -392,10 +424,11 @@ internal class IosLanChannel(
         }
     }
 
-    private fun receiveTimeout(fd: Int) {
+    /** 0 waits for as long as it takes. */
+    private fun receiveTimeout(fd: Int, seconds: Int = 1) {
         memScoped {
             val wait = alloc<timeval>()
-            wait.tv_sec = 1
+            wait.tv_sec = seconds.convert()
             wait.tv_usec = 0
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, wait.ptr, sizeOf<timeval>().convert())
         }
@@ -448,12 +481,14 @@ internal class IosLanChannel(
                 val hosts = (1..254).filter { it != subnet.self }.map { host ->
                     packAddress(subnet.first, subnet.second, subnet.third, host)
                 }
-                hosts.chunked(32).forEach { batch ->
+                // A few at a time. A burst of probes to empty addresses floods the hotspot with
+                // broadcasts, and the phone hosting it then drops its replies to this iPhone.
+                hosts.chunked(16).forEach { batch ->
                     if (!running) return
                     probeBatch(batch)
                 }
             }
-            platform.posix.sleep(if (links.isEmpty()) 1u else 4u)
+            platform.posix.sleep(if (links.isEmpty()) 2u else 15u)
         }
     }
 
@@ -487,6 +522,7 @@ internal class IosLanChannel(
             if (fd < 0) return@forEach
             if (running && socketReady(fd)) {
                 fcntl(fd, F_SETFL, 0)
+                receiveTimeout(fd, seconds = 3)
                 writeHello(fd, "")
                 background { readLoop(fd, known = null, outbound = true) }
             } else {
@@ -504,6 +540,12 @@ internal class IosLanChannel(
 
     private fun localSubnets(): List<Subnet> {
         val found = linkedMapOf<String, Subnet>()
+        // The Wi-Fi address itself. With no internet on the hotspot the iPhone keeps mobile data
+        // as its main route, so asking "which address reaches the internet" misses the hotspot.
+        interfaceSubnets().forEach { subnet ->
+            found["${subnet.first}.${subnet.second}.${subnet.third}.${subnet.self}"] = subnet
+        }
+        if (found.isNotEmpty()) return found.values.toList()
         listOf(
             packAddress(8, 8, 8, 8),
             packAddress(192, 168, 43, 1),
@@ -536,12 +578,41 @@ internal class IosLanChannel(
         val raw = if (named) local.sin_addr.s_addr else 0u
         close(fd)
         if (!named || raw == 0u) return null
+        subnetOf(raw)
+    }
+
+    private fun interfaceSubnets(): List<Subnet> = memScoped {
+        val found = ArrayList<Subnet>()
+        val list = alloc<CPointerVar<ifaddrs>>()
+        if (getifaddrs(list.ptr) != 0) return found
+        var cursor = list.value
+        while (cursor != null) {
+            val entry = cursor.pointed
+            val flags = entry.ifa_flags.toInt()
+            val address = entry.ifa_addr
+            val name = entry.ifa_name?.toKString().orEmpty()
+            // pdp_ip is mobile data. Other phones are never on it.
+            if (address != null &&
+                flags and IFF_UP != 0 &&
+                flags and IFF_LOOPBACK == 0 &&
+                !name.startsWith("pdp_ip") &&
+                address.pointed.sa_family.toInt() == AF_INET
+            ) {
+                subnetOf(address.reinterpret<sockaddr_in>().pointed.sin_addr.s_addr)?.let { found.add(it) }
+            }
+            cursor = entry.ifa_next
+        }
+        freeifaddrs(list.value)
+        found
+    }
+
+    private fun subnetOf(raw: UInt): Subnet? {
         val first = (raw and 0xFFu).toInt()
         val second = ((raw shr 8) and 0xFFu).toInt()
         val third = ((raw shr 16) and 0xFFu).toInt()
         val fourth = ((raw shr 24) and 0xFFu).toInt()
         if (!isPrivate(first, second) || fourth == 0) return null
-        Subnet(first, second, third, fourth)
+        return Subnet(first, second, third, fourth)
     }
 
     private fun isPrivate(first: Int, second: Int): Boolean {

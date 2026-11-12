@@ -563,7 +563,12 @@ class AndroidIntercomSession(
             }
             .createAudioDeviceModule()
         audioModule = module
+        // When this phone is the hotspot, Android does not list the hotspot as one of its networks.
+        // With the network monitor on, the voice link then has no address the other phone can reach.
+        // Off, it reads the phone's network interfaces itself and finds the hotspot one.
+        val options = PeerConnectionFactory.Options().apply { disableNetworkMonitor = true }
         factory = PeerConnectionFactory.builder()
+            .setOptions(options)
             .setAudioDeviceModule(module)
             .createPeerConnectionFactory()
         localSource = factory?.createAudioSource(MediaConstraints())
@@ -596,6 +601,7 @@ class AndroidIntercomSession(
         override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
 
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
+            Log.i(TAG, "Voice link to $peerId: $state")
             if (state == PeerConnection.IceConnectionState.CONNECTED ||
                 state == PeerConnection.IceConnectionState.COMPLETED
             ) {
@@ -614,6 +620,7 @@ class AndroidIntercomSession(
         }
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
+            Log.i(TAG, "Voice connection to $peerId: $newState")
             mainHandler.post {
                 val link = peers[peerId] ?: return@post
                 when (newState) {

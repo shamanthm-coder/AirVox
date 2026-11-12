@@ -8,11 +8,29 @@ import platform.AVFAudio.AVAudioFormat
 import platform.AVFAudio.AVAudioPCMBuffer
 import platform.AVFAudio.AVAudioPlayerNode
 import platform.AVFAudio.AVAudioSession
+import platform.AVFAudio.AVAudioSessionCategoryOptionAllowBluetooth
+import platform.AVFAudio.AVAudioSessionCategoryOptionAllowBluetoothA2DP
 import platform.AVFAudio.AVAudioSessionCategoryOptionDefaultToSpeaker
 import platform.AVFAudio.AVAudioSessionCategoryPlayAndRecord
 import platform.AVFAudio.AVAudioSessionModeDefault
+import platform.AVFAudio.AVAudioSessionPortAirPlay
+import platform.AVFAudio.AVAudioSessionPortBluetoothA2DP
+import platform.AVFAudio.AVAudioSessionPortBluetoothHFP
+import platform.AVFAudio.AVAudioSessionPortBluetoothLE
+import platform.AVFAudio.AVAudioSessionPortCarAudio
+import platform.AVFAudio.AVAudioSessionPortDescription
+import platform.AVFAudio.AVAudioSessionPortHeadphones
+import platform.AVFAudio.AVAudioSessionPortOverrideNone
 import platform.AVFAudio.AVAudioSessionPortOverrideSpeaker
+import platform.AVFAudio.AVAudioSessionRouteChangeNotification
+import platform.AVFAudio.AVAudioSessionRouteChangeReasonCategoryChange
+import platform.AVFAudio.AVAudioSessionRouteChangeReasonKey
+import platform.AVFAudio.AVAudioSessionRouteChangeReasonOverride
+import platform.AVFAudio.currentRoute
 import platform.AVFAudio.setActive
+import platform.Foundation.NSNotificationCenter
+import platform.Foundation.NSNumber
+import platform.Foundation.NSOperationQueue
 import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
@@ -39,6 +57,7 @@ class IosBleVoice(
     private var playRound = 0
     private var holdTicket = 0
     private val held = ArrayList<AVAudioPCMBuffer>()
+    private var routeObserver: Any? = null
 
     fun mutePlayback(muted: Boolean) {
         playRemote = !muted
@@ -165,7 +184,37 @@ class IosBleVoice(
         runCatching { player.stop() }
         resetQueue()
         runCatching { engine.stop() }
+        routeObserver?.let { NSNotificationCenter.defaultCenter.removeObserver(it) }
+        routeObserver = null
         runCatching { AVAudioSession.sharedInstance().setActive(false, null) }
+    }
+
+    /** Earbuds were switched on or off during the channel. Move the voice and the microphone with them. */
+    private fun watchRoute() {
+        if (routeObserver != null) return
+        routeObserver = NSNotificationCenter.defaultCenter.addObserverForName(
+            name = AVAudioSessionRouteChangeNotification,
+            `object` = null,
+            queue = NSOperationQueue.mainQueue,
+        ) { note ->
+            val reason = (note?.userInfo?.get(AVAudioSessionRouteChangeReasonKey) as? NSNumber)?.unsignedLongValue
+            // These two are this class changing the route itself.
+            if (reason == AVAudioSessionRouteChangeReasonOverride ||
+                reason == AVAudioSessionRouteChangeReasonCategoryChange
+            ) {
+                return@addObserverForName
+            }
+            if (!started) return@addObserverForName
+            runCatching { routeOutput() }
+            if (capturing) {
+                // The microphone changed, and its tap is tied to the old one's sample rate.
+                capturing = false
+                runCatching { engine.inputNode.removeTapOnBus(0u) }
+                startCapture()
+            } else {
+                ensureRunning()
+            }
+        }
     }
 
     private fun ensureRunning() {
@@ -174,12 +223,15 @@ class IosBleVoice(
             session.setCategory(
                 AVAudioSessionCategoryPlayAndRecord,
                 AVAudioSessionModeDefault,
-                AVAudioSessionCategoryOptionDefaultToSpeaker,
+                // Without the Bluetooth options iOS never sends this channel's voice to earbuds.
+                AVAudioSessionCategoryOptionDefaultToSpeaker or
+                    AVAudioSessionCategoryOptionAllowBluetooth or
+                    AVAudioSessionCategoryOptionAllowBluetoothA2DP,
                 null,
             )
             session.setActive(true, null)
-            // Voice-call mode uses the earpiece. This channel should use the loud speaker.
-            session.overrideOutputAudioPort(AVAudioSessionPortOverrideSpeaker, null)
+            routeOutput()
+            watchRoute()
             // The microphone has to be part of the engine before it starts, or talking sends nothing.
             engine.inputNode
             // Both people can talk at once, so the speaker's sound reaches the microphone.
@@ -199,7 +251,7 @@ class IosBleVoice(
         // without telling us. Start it again so voice from the other phone still plays.
         if (!engine.running) {
             AVAudioSession.sharedInstance().setActive(true, null)
-            AVAudioSession.sharedInstance().overrideOutputAudioPort(AVAudioSessionPortOverrideSpeaker, null)
+            routeOutput()
             // The player's own "playing" flag survives an engine stop. Reset it, then start
             // it again once the engine runs, or scheduled voice is never played.
             runCatching { player.stop() }
@@ -210,6 +262,21 @@ class IosBleVoice(
             if (engine.running) player.play()
         }
         if (engine.running && !player.playing) player.play()
+    }
+
+    /**
+     * Earbuds, a headset or the car when one is connected. Otherwise the loud speaker,
+     * because a voice session on its own plays through the earpiece.
+     */
+    private fun routeOutput() {
+        val session = AVAudioSession.sharedInstance()
+        val external = session.currentRoute.outputs.any { port ->
+            (port as? AVAudioSessionPortDescription)?.portType in EXTERNAL_OUTPUTS
+        }
+        session.overrideOutputAudioPort(
+            if (external) AVAudioSessionPortOverrideNone else AVAudioSessionPortOverrideSpeaker,
+            null,
+        )
     }
 
     private fun encodeMulaw(sample: Int): Byte {
@@ -244,5 +311,14 @@ class IosBleVoice(
 
         /** Set to false if the iPhone speaker becomes too quiet with echo cancelling on. */
         const val ECHO_CANCEL = true
+
+        val EXTERNAL_OUTPUTS = setOf(
+            AVAudioSessionPortBluetoothA2DP,
+            AVAudioSessionPortBluetoothHFP,
+            AVAudioSessionPortBluetoothLE,
+            AVAudioSessionPortHeadphones,
+            AVAudioSessionPortCarAudio,
+            AVAudioSessionPortAirPlay,
+        )
     }
 }
