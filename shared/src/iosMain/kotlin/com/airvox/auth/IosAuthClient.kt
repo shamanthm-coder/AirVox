@@ -188,16 +188,20 @@ class IosAuthClient(
         }
     }
 
-    override fun recordCredits(kind: String, credits: Int) {
-        if (tokens == null || _state.value.account == null) return
+    override fun buyCredits(credits: Int, onResult: (Boolean) -> Unit) {
+        if (tokens == null || _state.value.account == null) {
+            onResult(false)
+            return
+        }
         scope.launch {
-            runCatching {
+            val saved = runCatching {
                 val body = buildJsonObject {
-                    put("kind", kind)
+                    put("kind", "purchase")
                     put("credits", credits)
                 }
-                send("POST", "$baseUrl/v1/credits", idToken(), body.toString())
-            }
+                send("POST", "$baseUrl/v1/credits", idToken(), body.toString()).status in 200..299
+            }.getOrDefault(false)
+            onResult(saved)
         }
     }
 
@@ -210,30 +214,39 @@ class IosAuthClient(
         scope.launch { flushChannels() }
     }
 
-    override fun heartbeat(credits: Int, room: String, mode: String, clearOffset: Boolean) {
-        if (tokens == null || _state.value.account == null || _state.value.signedInElsewhere) return
+    override fun heartbeat(install: String, spent: Int, room: String, mode: String) {
+        val riderId = _state.value.account?.id ?: return
+        if (tokens == null || _state.value.signedInElsewhere) return
         scope.launch {
             flushChannels()
             val sent = store.stringForKey(KEY_SESSION).orEmpty()
-            val rejected = runCatching {
-                if (sent.isEmpty()) return@runCatching false
+            if (sent.isEmpty()) return@launch
+            val reply = runCatching {
                 val body = buildJsonObject {
-                    put("credits", credits)
-                    if (clearOffset) put("clearOffset", true)
+                    if (install.isNotEmpty()) {
+                        put("install", install)
+                        put("spent", spent)
+                    }
                     val channel = normalizeChannel(room, mode)
                     if (channel != null) {
                         put("room", channel.first)
                         put("mode", channel.second)
                     }
                 }
-                val reply = send("POST", "$baseUrl/v1/heartbeat", idToken(), body.toString())
-                reply.status == 409 &&
-                    "signed_in_elsewhere" in reply.body &&
-                    store.stringForKey(KEY_SESSION).orEmpty() == sent
-            }.getOrDefault(false)
-            if (rejected && noticeOtherSignIn && store.stringForKey(KEY_SESSION).orEmpty() == sent && _state.value.account != null) {
-                update { it.copy(signedInElsewhere = true) }
+                send("POST", "$baseUrl/v1/heartbeat", idToken(), body.toString())
+            }.getOrNull() ?: return@launch
+            val current = store.stringForKey(KEY_SESSION).orEmpty()
+            if (reply.status == 409) {
+                if ("signed_in_elsewhere" in reply.body && noticeOtherSignIn && current == sent && _state.value.account != null) {
+                    update { it.copy(signedInElsewhere = true) }
+                }
+                return@launch
             }
+            if (reply.status != 200 || _state.value.account?.id != riderId) return@launch
+            val wallet = parse(reply.body) ?: return@launch
+            val balance = wallet.string("walletBalance")?.toIntOrNull() ?: return@launch
+            val counted = wallet.string("spentCounted")?.toIntOrNull()?.takeIf { it >= 0 } ?: return@launch
+            update { it.copy(wallet = ServerWallet(balance, counted)) }
         }
     }
 
@@ -386,13 +399,7 @@ class IosAuthClient(
             val rider = if (name == null) {
                 created
             } else {
-                // Saving the name returns the rider without the free credits. Keep the gift from sign-up.
                 patchProfile(idToken(), name, phone = null, complete = false)
-                    .copy(
-                        welcomeCredits = created.welcomeCredits,
-                        balanceOffset = created.balanceOffset,
-                        walletBalance = created.walletBalance,
-                    )
             }
             saveRider(rider)
             update {
@@ -401,7 +408,8 @@ class IosAuthClient(
                     account = rider,
                     busy = false,
                     error = null,
-                    needsProfile = needsProfile && !rider.profileComplete,
+                    // The server says when a mobile number is still missing, for old accounts too.
+                    needsProfile = !rider.profileComplete,
                     signedInElsewhere = false,
                 )
             }
@@ -431,15 +439,13 @@ class IosAuthClient(
         val name = displayName?.trim()?.takeIf { validName(it) }
         val cached = loadRider()
         if (cached != null) {
-            return cached.copy(displayName = name ?: cached.displayName, welcomeCredits = 0)
+            return cached.copy(displayName = name ?: cached.displayName)
         }
         val token = tokens?.idToken?.takeIf { it.isNotBlank() } ?: return null
         val fromToken = riderFromToken(token) ?: return null
         return fromToken.copy(
             displayName = name ?: fromToken.displayName,
             profileComplete = !needsProfile,
-            welcomeCredits = 0,
-            balanceOffset = 0,
         )
     }
 
@@ -504,12 +510,7 @@ class IosAuthClient(
             throw SessionFailed(message, signedOut = reply.status == 401 || reply.status == 410)
         }
         parsed.string("sessionId")?.let { store.setObject(it, KEY_SESSION) }
-        val rider = parseRider(parsed["rider"]!!.jsonObject)
-        return rider.copy(
-            welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
-            balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
-            walletBalance = parsed.string("walletBalance")?.toIntOrNull() ?: 0,
-        )
+        return parseRider(parsed["rider"]!!.jsonObject)
     }
 
     private suspend fun runAuth(block: suspend () -> Unit) {
@@ -533,7 +534,10 @@ class IosAuthClient(
     }
 
     private fun update(block: (AuthState) -> AuthState) {
-        val next = block(_state.value)
+        val before = _state.value
+        val changed = block(before)
+        // One rider's balance must never show on the next rider's account.
+        val next = if (changed.account?.id != before.account?.id) changed.copy(wallet = null) else changed
         _state.value = next.copy(
             pendingSession = tokens != null && next.account == null,
             configured = firebaseApiKey.isNotBlank() && next.phase != AuthPhase.Restoring || next.configured,
@@ -569,9 +573,6 @@ class IosAuthClient(
             put("id", rider.id)
             put("signInProvider", rider.signInProvider)
             put("profileComplete", rider.profileComplete)
-            put("welcomeCredits", rider.welcomeCredits)
-            put("balanceOffset", rider.balanceOffset)
-            put("walletBalance", rider.walletBalance)
             if (rider.phoneNumber != null) put("phoneNumber", rider.phoneNumber)
             if (rider.email != null) put("email", rider.email)
             if (rider.displayName != null) put("displayName", rider.displayName)
@@ -593,9 +594,6 @@ class IosAuthClient(
             signInProvider = parsed.string("signInProvider").orEmpty(),
             providers = runCatching { parsed["providers"]!!.jsonArray.map { it.jsonPrimitive.content } }.getOrDefault(emptyList()),
             profileComplete = (parsed["profileComplete"] as? JsonPrimitive)?.booleanOrNull ?: false,
-            welcomeCredits = parsed.string("welcomeCredits")?.toIntOrNull() ?: 0,
-            balanceOffset = parsed.string("balanceOffset")?.toIntOrNull() ?: 0,
-            walletBalance = parsed.string("walletBalance")?.toIntOrNull() ?: 0,
         )
     }
 

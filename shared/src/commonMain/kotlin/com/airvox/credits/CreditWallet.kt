@@ -2,6 +2,7 @@ package com.airvox.credits
 
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
+import kotlin.random.Random
 
 data class CreditBalance(
     val credits: Int = 0,
@@ -19,6 +20,10 @@ data class CreditPlan(
     val rupees: Int,
 )
 
+/**
+ * What this phone shows. The real balance is kept by the Airvox server.
+ * The phone counts the minutes it uses, including offline, and the server takes them off the wallet.
+ */
 class CreditWallet(
     initial: CreditBalance = CreditBalance(),
     private var persist: (CreditBalance) -> Unit = {},
@@ -26,27 +31,25 @@ class CreditWallet(
     private val _state = mutableStateOf(initial)
     val state: State<CreditBalance> = _state
 
+    /** A random id for this install's wallet. The server counts [CreditBalance.spent] against it. */
+    var install: String = ""
+        private set
+
     /** Loads the balance saved for the rider who just signed in. */
-    fun bind(balance: CreditBalance, persist: (CreditBalance) -> Unit) {
+    fun bind(balance: CreditBalance, install: String, persist: (CreditBalance) -> Unit) {
         this.persist = persist
+        this.install = install
         _state.value = balance
     }
 
-    fun add(amount: Int) {
-        if (amount <= 0) return
-        update { it.copy(credits = it.credits + amount) }
-    }
-
-    /** Uses the portal balance when this phone has less saved than the portal. */
-    fun adopt(amount: Int) {
-        if (amount <= _state.value.credits) return
-        update { it.copy(credits = amount) }
-    }
-
-    /** Removes credits that were added by mistake, such as a second welcome grant. */
-    fun remove(amount: Int) {
-        if (amount <= 0) return
-        update { it.copy(credits = (it.credits - amount).coerceAtLeast(0)) }
+    /**
+     * Shows the server's balance. [counted] is the spent total the server had already taken off,
+     * so minutes used since then stay off the number shown.
+     */
+    fun sync(serverBalance: Int, counted: Int) {
+        val uncounted = (_state.value.spent - counted).coerceAtLeast(0)
+        val credits = (serverBalance - uncounted).coerceAtLeast(0)
+        if (credits != _state.value.credits) update { it.copy(credits = credits) }
     }
 
     /** One minute on a channel costs [CREDIT_PER_MINUTE]. Returns false when the balance is empty. */
@@ -68,3 +71,6 @@ class CreditWallet(
         persist(next)
     }
 }
+
+/** A new id for [CreditWallet.install]. */
+fun newWalletInstall(): String = List(4) { Random.nextInt().toUInt().toString(16).padStart(8, '0') }.joinToString("")

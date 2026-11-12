@@ -184,64 +184,109 @@ class AuthApiTest {
     }
 
     @Test
-    fun heartbeatStoresTheBalanceShownOnThePhone() {
-        val balances = mutableListOf<Int>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
-            override fun setWallet(rider: Rider, credits: Int) {
-                balances += credits
-            }
-        }
-        withApi(sync = sync) {
+    fun heartbeatTakesUsedCreditsOffTheWallet() {
+        withApi {
             val created = client.post("/v1/session") { bearer("good") }
-            val beat = client.post("/v1/heartbeat") {
-                bearer("good")
-                header("X-Airvox-Session", rootField(created.bodyAsText(), "sessionId"))
-                contentType(ContentType.Application.Json)
-                setBody("""{"credits":430}""")
+            val session = rootField(created.bodyAsText(), "sessionId")
+            suspend fun beat(body: String): String {
+                val reply = client.post("/v1/heartbeat") {
+                    bearer("good")
+                    header("X-Airvox-Session", session)
+                    contentType(ContentType.Application.Json)
+                    setBody(body)
+                }
+                assertEquals(HttpStatusCode.OK, reply.status)
+                return reply.bodyAsText()
             }
-            assertEquals(HttpStatusCode.NoContent, beat.status)
+            // The first check-in from an install only sets where counting starts.
+            val first = beat("""{"install":"phone-aaaa","spent":5}""")
+            assertEquals("20", rootField(first, "walletBalance"))
+            assertEquals("5", rootField(first, "spentCounted"))
+            assertEquals("17", rootField(beat("""{"install":"phone-aaaa","spent":8}"""), "walletBalance"))
+            // The same total sent twice is charged once.
+            assertEquals("17", rootField(beat("""{"install":"phone-aaaa","spent":8}"""), "walletBalance"))
+            // A reinstalled or second phone starts from the saved wallet, not from its own empty one.
+            assertEquals("17", rootField(beat("""{"install":"phone-bbbb","spent":0}"""), "walletBalance"))
+            // An older app sends only its own balance. That never changes the wallet.
+            val old = beat("""{"credits":0}""")
+            assertEquals("17", rootField(old, "walletBalance"))
+            assertEquals("-1", rootField(old, "spentCounted"))
         }
-        assertEquals(listOf(430), balances)
     }
 
     @Test
-    fun anEmptyPhoneDoesNotWipeThePortalBalance() {
-        val balances = mutableListOf<Int>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
-            override fun walletBalance(firebaseUid: String) = 72
-            override fun setWallet(rider: Rider, credits: Int) {
-                balances += credits
+    fun theWalletNeverGoesBelowZero() {
+        withApi {
+            val created = client.post("/v1/session") { bearer("good") }
+            val session = rootField(created.bodyAsText(), "sessionId")
+            listOf(0 to "20", 50 to "0").forEach { (spent, left) ->
+                val reply = client.post("/v1/heartbeat") {
+                    bearer("good")
+                    header("X-Airvox-Session", session)
+                    contentType(ContentType.Application.Json)
+                    setBody("""{"install":"phone-aaaa","spent":$spent}""")
+                }
+                assertEquals(left, rootField(reply.bodyAsText(), "walletBalance"))
             }
+        }
+    }
+
+    @Test
+    fun welcomeCreditsWaitWhenThePortalCannotBeReached() {
+        var reachable = false
+        val sync = object : LocalRiderSync() {
+            override fun existingAccount(firebaseUid: String): Boolean? = if (reachable) true else null
         }
         withApi(sync = sync) {
             val created = client.post("/v1/session") { bearer("good") }
-            assertEquals("72", rootField(created.bodyAsText(), "walletBalance"))
-            val session = rootField(created.bodyAsText(), "sessionId")
-            val wiped = client.post("/v1/heartbeat") {
-                bearer("good")
-                header("X-Airvox-Session", session)
-                contentType(ContentType.Application.Json)
-                setBody("""{"credits":0}""")
-            }
-            assertEquals(HttpStatusCode.NoContent, wiped.status)
-            val spent = client.post("/v1/heartbeat") {
-                bearer("good")
-                header("X-Airvox-Session", session)
-                contentType(ContentType.Application.Json)
-                setBody("""{"credits":40}""")
-            }
-            assertEquals(HttpStatusCode.NoContent, spent.status)
-            val finished = client.post("/v1/heartbeat") {
-                bearer("good")
-                header("X-Airvox-Session", session)
-                contentType(ContentType.Application.Json)
-                setBody("""{"credits":0}""")
-            }
-            assertEquals(HttpStatusCode.NoContent, finished.status)
+            assertEquals("0", rootField(created.bodyAsText(), "welcomeCredits"))
+            // By now the sign-in was copied to the portal, so the account looks old.
+            reachable = true
+            val again = client.post("/v1/session") { bearer("good") }
+            assertEquals("20", rootField(again.bodyAsText(), "welcomeCredits"))
+            val third = client.post("/v1/session") { bearer("good") }
+            assertEquals("0", rootField(third.bodyAsText(), "welcomeCredits"))
         }
-        assertEquals(listOf(40, 0), balances)
+        assertEquals(20, sync.walletBalance("uid-1"))
+    }
+
+    @Test
+    fun anAccountWithoutAMobileNumberIsAskedForIt() {
+        val email = identity.copy(phoneNumber = null, email = "rider@example.com", signInProvider = "password", providers = listOf("password"))
+        var portalPhone: String? = null
+        val sync = object : LocalRiderSync() {
+            override fun existingAccount(firebaseUid: String) = true
+            override fun portalPhone(firebaseUid: String) = portalPhone
+        }
+        withApi(sync = sync, identity = email) {
+            val asked = client.post("/v1/session") { bearer("good") }
+            assertEquals("false", riderField(asked.bodyAsText(), "profileComplete"))
+            // The number saved in the portal counts, so the rider is not asked twice.
+            portalPhone = "+919812345678"
+            val known = client.post("/v1/session") { bearer("good") }
+            assertEquals("true", riderField(known.bodyAsText(), "profileComplete"))
+            assertEquals("+919812345678", riderField(known.bodyAsText(), "phoneNumber"))
+        }
+    }
+
+    @Test
+    fun savingTheProfileKeepsThisPhoneSignedIn() {
+        withApi {
+            val created = client.post("/v1/session") { bearer("good") }
+            val session = rootField(created.bodyAsText(), "sessionId")
+            client.patch("/v1/me") {
+                bearer("good")
+                contentType(ContentType.Application.Json)
+                setBody("""{"displayName":"Asha","phoneNumber":"+919812345678","completeProfile":true}""")
+            }
+            val beat = client.post("/v1/heartbeat") {
+                bearer("good")
+                header("X-Airvox-Session", session)
+                contentType(ContentType.Application.Json)
+                setBody("{}")
+            }
+            assertEquals(HttpStatusCode.OK, beat.status)
+        }
     }
 
     @Test
@@ -267,15 +312,14 @@ class AuthApiTest {
                 contentType(ContentType.Application.Json)
                 setBody("""{"credits":1}""")
             }
-            assertEquals(HttpStatusCode.NoContent, newPhone.status)
+            assertEquals(HttpStatusCode.OK, newPhone.status)
         }
     }
 
     @Test
     fun anExistingAccountDoesNotGetWelcomeCreditsAgain() {
         var grants = 0
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun existingAccount(firebaseUid: String) = true
             override fun recordCredits(rider: Rider, kind: String, credits: Int) {
                 grants += 1
@@ -295,8 +339,7 @@ class AuthApiTest {
 
     @Test
     fun welcomeCreditsComeFromThePortal() {
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun welcomeCredits(): Int = 40
         }
         withApi(sync = sync) {
@@ -355,8 +398,7 @@ class AuthApiTest {
 
     @Test
     fun sendsPortalPlansToThePhone() {
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun activePlans() = listOf(PlanOffer(1, "Weekend", 80, 80))
         }
         withApi(sync = sync) {
@@ -371,10 +413,9 @@ class AuthApiTest {
     }
 
     @Test
-    fun recordsCreditUseAndPurchases() {
+    fun aPurchaseAddsToTheWallet() {
         val rows = mutableListOf<Triple<String, String, Int>>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun recordCredits(rider: Rider, kind: String, credits: Int) {
                 rows += Triple(rider.id, kind, credits)
             }
@@ -393,13 +434,14 @@ class AuthApiTest {
                 contentType(ContentType.Application.Json)
                 setBody("""{"kind":"consume","credits":1}""")
             }
-            assertEquals(HttpStatusCode.NoContent, used.status)
+            assertEquals(HttpStatusCode.BadRequest, used.status)
             val bought = client.post("/v1/credits") {
                 bearer("good")
                 contentType(ContentType.Application.Json)
                 setBody("""{"kind":"purchase","credits":50}""")
             }
-            assertEquals(HttpStatusCode.NoContent, bought.status)
+            assertEquals(HttpStatusCode.OK, bought.status)
+            assertEquals("70", rootField(bought.bodyAsText(), "walletBalance"))
             val bad = client.post("/v1/credits") {
                 bearer("good")
                 contentType(ContentType.Application.Json)
@@ -410,7 +452,6 @@ class AuthApiTest {
         assertEquals(
             listOf(
                 Triple("uid-1", "grant", 20),
-                Triple("uid-1", "consume", 1),
                 Triple("uid-1", "purchase", 50),
             ),
             rows,
@@ -420,8 +461,7 @@ class AuthApiTest {
     @Test
     fun signOutTellsThePortal() {
         val signedOut = mutableListOf<String>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun riderSignedOut(firebaseUid: String) {
                 signedOut += firebaseUid
             }
@@ -439,8 +479,7 @@ class AuthApiTest {
     @Test
     fun staffCanDeleteARiderAndFreeTheEmail() {
         val deleted = mutableListOf<String>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun removeRider(userId: String): RemovedRider? {
                 if (userId != "11111111-1111-1111-1111-111111111111") return null
                 return RemovedRider(userId, "uid-1")
@@ -472,8 +511,7 @@ class AuthApiTest {
     @Test
     fun aRiderChannelIsSavedForThePortal() {
         val events = mutableListOf<String>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun reportChannel(rider: Rider, room: String, mode: String, action: String, at: String?) {
                 events += "$action $room $mode"
             }
@@ -500,7 +538,7 @@ class AuthApiTest {
                 contentType(ContentType.Application.Json)
                 setBody("""{"credits":3,"room":"ride1","mode":"Hotspot"}""")
             }
-            assertEquals(HttpStatusCode.NoContent, here.status)
+            assertEquals(HttpStatusCode.OK, here.status)
             val bad = client.post("/v1/channels") {
                 bearer("good")
                 contentType(ContentType.Application.Json)
@@ -514,8 +552,7 @@ class AuthApiTest {
     @Test
     fun staffCanStopALiveChannel() {
         val stopped = mutableListOf<String>()
-        val sync = object : RiderSync {
-            override fun riderSeen(rider: Rider, platform: String?) = Unit
+        val sync = object : LocalRiderSync() {
             override fun stopChannel(channelId: String): Boolean {
                 if (channelId != "33333333-3333-3333-3333-333333333333") return false
                 stopped += channelId
@@ -555,21 +592,71 @@ class AuthApiTest {
     }
 
     @Test
-    fun aDuplicateWelcomeGrantIsTakenOffTheReportedBalance() {
+    fun staffCanAddCreditsAndPortalAccounts() {
+        val added = mutableListOf<Pair<String, Int>>()
+        val sync = object : LocalRiderSync() {
+            override fun addCredits(userId: String, credits: Int): Int? {
+                if (userId != "33333333-3333-3333-3333-333333333333") return null
+                added += userId to credits
+                return 62 + credits
+            }
+        }
+        val made = mutableListOf<String>()
+        val staffAccounts = object : StaffAccounts {
+            override fun list() = made.map { StaffAccount(it, "admin") }
+            override fun create(email: String, password: String): StaffAccount {
+                if (email in made) throw StaffAccountRefused("An account with this email already exists.")
+                made += email
+                return StaffAccount(email, "admin")
+            }
+        }
+        withApi(sync = sync, staff = { it == "staff" }, staffAccounts = staffAccounts) {
+            suspend fun add(token: String, id: String, credits: Int) = client.post("/v1/riders/$id/credits") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody("""{"credits":$credits}""")
+            }
+            assertEquals(HttpStatusCode.Forbidden, add("good", "33333333-3333-3333-3333-333333333333", 50).status)
+            assertEquals(HttpStatusCode.BadRequest, add("staff", "33333333-3333-3333-3333-333333333333", 0).status)
+            assertEquals(HttpStatusCode.NotFound, add("staff", "22222222-2222-2222-2222-222222222222", 50).status)
+            val done = add("staff", "33333333-3333-3333-3333-333333333333", 50)
+            assertEquals(HttpStatusCode.OK, done.status)
+            assertEquals("112", rootField(done.bodyAsText(), "walletBalance"))
+
+            suspend fun create(token: String, body: String) = client.post("/v1/staff") {
+                bearer(token)
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+            assertEquals(HttpStatusCode.Forbidden, create("good", """{"email":"new@airvox.in","password":"secret1"}""").status)
+            assertEquals(HttpStatusCode.BadRequest, create("staff", """{"email":"new@airvox.in","password":"123"}""").status)
+            assertEquals(HttpStatusCode.BadRequest, create("staff", """{"email":"not-an-email","password":"secret1"}""").status)
+            assertEquals(HttpStatusCode.Created, create("staff", """{"email":" New@Airvox.in ","password":"secret1"}""").status)
+            assertEquals(HttpStatusCode.Conflict, create("staff", """{"email":"new@airvox.in","password":"secret1"}""").status)
+            assertEquals(HttpStatusCode.Forbidden, client.get("/v1/staff") { bearer("good") }.status)
+            val listed = client.get("/v1/staff") { bearer("staff") }
+            assertEquals(HttpStatusCode.OK, listed.status)
+            assertTrue(listed.bodyAsText().contains("new@airvox.in"))
+        }
+        assertEquals(listOf("33333333-3333-3333-3333-333333333333" to 50), added)
+    }
+
+    @Test
+    fun anOlderRiderFileStillLoads() {
         val dir = createTempDirectory("airvox-riders")
         val file = dir.resolve("riders.json")
         try {
             file.writeText(
                 """
-                {"riders":[{"id":"uid-1","phoneNumber":null,"email":"ben1@yopmail.com","displayName":null,"displayNameCustom":false,"profileComplete":false,"welcomeGranted":true,"balanceOffset":20,"signInProvider":"password","providers":["password"],"createdAt":"2026-11-04T09:12:57Z","lastSeenAt":"2026-11-05T04:41:02Z"}],"removed":[]}
+                {"riders":[{"id":"uid-1","phoneNumber":null,"email":"ben1@yopmail.com","displayName":null,"displayNameCustom":false,"profileComplete":true,"welcomeGranted":true,"balanceOffset":20,"signInProvider":"password","providers":["password"],"createdAt":"2026-11-04T09:12:57Z","lastSeenAt":"2026-11-05T04:41:02Z"}],"removed":[]}
                 """.trimIndent(),
             )
             val store = RiderStore(file)
-            assertEquals(20, store.balanceOffset("uid-1"))
-            assertEquals(20, store.walletToStore("uid-1", 40, clearOffset = false))
-            assertEquals(20, store.walletToStore("uid-1", 20, clearOffset = true))
-            assertEquals(0, store.balanceOffset("uid-1"))
-            assertEquals(20, store.walletToStore("uid-1", 20, clearOffset = false))
+            // Marked complete by an older server, but there is no mobile number.
+            assertEquals(false, store.find("uid-1")?.profileComplete)
+            assertEquals(0, store.spendSince("uid-1", "phone-aaaa", 9))
+            store.countSpent("uid-1", "phone-aaaa", 9)
+            assertEquals(3, RiderStore(file).spendSince("uid-1", "phone-aaaa", 12))
         } finally {
             dir.toFile().deleteRecursively()
         }
@@ -591,9 +678,11 @@ class AuthApiTest {
     }
 
     private fun withApi(
-        sync: RiderSync = NoRiderSync,
+        sync: RiderSync = LocalRiderSync(),
+        staffAccounts: StaffAccounts = NoStaffAccounts,
         staff: StaffGate = StaffGate { false },
         accounts: AccountDeleter = AccountDeleter { false },
+        identity: FirebaseIdentity = this.identity,
         block: suspend io.ktor.server.testing.ApplicationTestBuilder.(advance: () -> Unit) -> Unit,
     ) {
         val dir = createTempDirectory("airvox-api")
@@ -608,7 +697,7 @@ class AuthApiTest {
         }
         try {
             testApplication {
-                application { airvoxApi(verifier, store, sync, staff, accounts) }
+                application { airvoxApi(verifier, store, sync, staff, accounts, staffAccounts) }
                 block { now = now.plusSeconds(30) }
             }
         } finally {

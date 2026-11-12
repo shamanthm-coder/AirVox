@@ -31,7 +31,6 @@ import androidx.compose.ui.window.DialogProperties
 import com.airvox.auth.AuthClient
 import com.airvox.auth.AuthPhase
 import com.airvox.bluetooth.BluetoothEarphoneScanner
-import com.airvox.credits.CREDIT_PER_MINUTE
 import com.airvox.credits.CreditPlan
 import com.airvox.credits.CreditWallet
 import com.airvox.intercom.IntercomConnection
@@ -68,8 +67,6 @@ fun AirvoxApp(
     auth: AuthClient,
     wallet: CreditWallet = CreditWallet(),
     bindWallet: (String) -> Unit = {},
-    offsetAlreadyRemoved: (String, Int) -> Boolean = { _, _ -> false },
-    markOffsetRemoved: (String, Int) -> Unit = { _, _ -> },
 ) {
     val signedInId = auth.state.value.account?.id
     var destination by remember(signedInId) { mutableStateOf(Destination.Channel) }
@@ -121,42 +118,33 @@ fun AirvoxApp(
     }
     val signedIn = authState.account
     var walletReady by remember { mutableStateOf<String?>(null) }
-    var clearOffset by remember { mutableStateOf(false) }
-    LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits, signedIn?.balanceOffset, signedIn?.walletBalance) {
+    val checkIn = {
+        val live = session.state.value
+        val onChannel = live.connection == IntercomConnection.Connected ||
+            live.connection == IntercomConnection.Connecting
+        auth.heartbeat(
+            wallet.install,
+            wallet.state.value.spent,
+            if (onChannel) live.roomCode else "",
+            if (onChannel) live.path.label else "",
+        )
+    }
+    LaunchedEffect(signedIn?.id) {
         val account = signedIn
         if (account == null) {
             walletReady = null
             return@LaunchedEffect
         }
         bindWallet(account.id)
-        if (account.welcomeCredits > 0) wallet.add(account.welcomeCredits)
-        if (account.balanceOffset > 0) {
-            if (!offsetAlreadyRemoved(account.id, account.balanceOffset)) {
-                wallet.remove(account.balanceOffset)
-                markOffsetRemoved(account.id, account.balanceOffset)
-            }
-            clearOffset = true
-        }
-        // The portal keeps the balance. An empty phone must take that number, not push 0 back.
-        if (account.walletBalance > wallet.state.value.credits) {
-            wallet.adopt(account.walletBalance)
-        }
         walletReady = account.id
+        // Ask for the balance at once. Free credits and credits added in the portal arrive this way.
+        checkIn()
     }
-    val shownCredits = wallet.state.value.credits
-    LaunchedEffect(signedIn?.id, shownCredits, walletReady) {
-        if (signedIn?.id == null || walletReady != signedIn.id) return@LaunchedEffect
-        val drop = clearOffset
-        if (drop) clearOffset = false
-        val live = session.state.value
-        val onChannel = live.connection == IntercomConnection.Connected ||
-            live.connection == IntercomConnection.Connecting
-        auth.heartbeat(
-            shownCredits,
-            if (onChannel) live.roomCode else "",
-            if (onChannel) live.path.label else "",
-            clearOffset = drop,
-        )
+    // The server keeps the balance. The phone only shows it, less the minutes not yet counted.
+    val serverWallet = authState.wallet
+    LaunchedEffect(walletReady, serverWallet) {
+        if (serverWallet == null || signedIn?.id == null || walletReady != signedIn.id) return@LaunchedEffect
+        wallet.sync(serverWallet.balance, serverWallet.spentCounted)
     }
     if (auth.enforced && authState.needsProfile && authState.account?.profileComplete != true) {
         ProfileScreen(auth)
@@ -186,14 +174,7 @@ fun AirvoxApp(
         if (riderId == null) return@LaunchedEffect
         while (true) {
             delay(HEARTBEAT_MS.milliseconds)
-            val live = session.state.value
-            val onChannel = live.connection == IntercomConnection.Connected ||
-                live.connection == IntercomConnection.Connecting
-            auth.heartbeat(
-                wallet.state.value.credits,
-                if (onChannel) live.roomCode else "",
-                if (onChannel) live.path.label else "",
-            )
+            if (walletReady == riderId) checkIn()
         }
     }
 
@@ -218,7 +199,7 @@ fun AirvoxApp(
                 vox.leave()
                 return@LaunchedEffect
             }
-            auth.recordCredits("consume", CREDIT_PER_MINUTE)
+            checkIn()
             delay(60_000.milliseconds)
         }
     }
@@ -287,9 +268,11 @@ fun AirvoxApp(
                     balance = wallet.state.value,
                     plans = plans,
                     onRefresh = { auth.loadPlans { plans = it } },
-                    onBuy = { pack ->
-                        wallet.add(pack)
-                        auth.recordCredits("purchase", pack)
+                    onBuy = { pack, done ->
+                        auth.buyCredits(pack) { saved ->
+                            if (saved) checkIn()
+                            done(saved)
+                        }
                     },
                 )
                 Destination.Settings -> SettingsScreen(auth)

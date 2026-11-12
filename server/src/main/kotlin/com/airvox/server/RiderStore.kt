@@ -29,7 +29,11 @@ class RiderStore(
         }
     }
 
-    fun upsert(identity: FirebaseIdentity): UpsertedRider = synchronized(lock) {
+    /**
+     * [newSession] is true for a sign-in, which signs the previous phone out.
+     * Saving a name or mobile number keeps the session the phone already holds.
+     */
+    fun upsert(identity: FirebaseIdentity, newSession: Boolean = true): UpsertedRider = synchronized(lock) {
         if (identity.uid in removed) throw RiderRemoved()
         val now = clock().toString()
         val existing = riders[identity.uid]
@@ -47,10 +51,11 @@ class RiderStore(
             displayNameCustom = existing?.displayNameCustom == true,
             profileComplete = existing?.profileComplete == true,
             welcomeGranted = existing?.welcomeGranted == true,
-            balanceOffset = existing?.balanceOffset ?: 0,
+            welcomeOwed = existing?.welcomeOwed == true,
+            spentSeen = existing?.spentSeen ?: emptyMap(),
             signInProvider = identity.signInProvider,
             providers = identity.providers.ifEmpty { listOf(identity.signInProvider) },
-            sessionId = UUID.randomUUID().toString(),
+            sessionId = if (newSession) UUID.randomUUID().toString() else existing?.sessionId.orEmpty(),
             createdAt = existing?.createdAt ?: now,
             lastSeenAt = now,
         )
@@ -95,11 +100,15 @@ class RiderStore(
         riders[uid]?.toPublic()
     }
 
-    /** An account that already exists does not have to enter a name and mobile again. */
-    fun acceptReturningRider(uid: String): Rider? = synchronized(lock) {
+    /**
+     * An account that already gave a mobile number does not have to enter it again.
+     * [portalPhone] is the number saved in the portal, for when this server's file lost it.
+     */
+    fun acceptReturningRider(uid: String, portalPhone: String?): Rider? = synchronized(lock) {
         val existing = riders[uid] ?: return null
-        if (existing.profileComplete) return existing.toPublic()
-        val stored = existing.copy(profileComplete = true, lastSeenAt = clock().toString())
+        val phone = existing.phoneNumber?.takeIf { it.isNotBlank() } ?: portalPhone?.takeIf { it.isNotBlank() }
+        if (phone == null || (existing.profileComplete && existing.phoneNumber == phone)) return existing.toPublic()
+        val stored = existing.copy(phoneNumber = phone, profileComplete = true, lastSeenAt = clock().toString())
         riders[uid] = stored
         persist()
         stored.toPublic()
@@ -112,28 +121,43 @@ class RiderStore(
     fun markWelcomeGranted(uid: String) {
         synchronized(lock) {
             val existing = riders[uid] ?: return
-            if (existing.welcomeGranted) return
-            riders[uid] = existing.copy(welcomeGranted = true)
+            if (existing.welcomeGranted && !existing.welcomeOwed) return
+            riders[uid] = existing.copy(welcomeGranted = true, welcomeOwed = false)
             persist()
         }
     }
 
-    fun balanceOffset(uid: String): Int = synchronized(lock) {
-        (riders[uid]?.balanceOffset ?: 0).coerceAtLeast(0)
+    fun welcomeOwed(uid: String): Boolean = synchronized(lock) {
+        riders[uid]?.welcomeOwed == true
     }
 
-    /** Balance to store. [clearOffset] means the phone already removed the correction itself. */
-    fun walletToStore(uid: String, reported: Int, clearOffset: Boolean): Int = synchronized(lock) {
-        val amount = reported.coerceIn(0, 1_000_000)
-        val existing = riders[uid] ?: return amount
-        if (clearOffset) {
-            if (existing.balanceOffset != 0) {
-                riders[uid] = existing.copy(balanceOffset = 0)
-                persist()
-            }
-            return amount
+    fun markWelcomeOwed(uid: String) {
+        synchronized(lock) {
+            val existing = riders[uid] ?: return
+            if (existing.welcomeOwed) return
+            riders[uid] = existing.copy(welcomeOwed = true)
+            persist()
         }
-        return (amount - existing.balanceOffset.coerceAtLeast(0)).coerceAtLeast(0)
+    }
+
+    /**
+     * Credits this install used since the server last counted it.
+     * 0 for an install the server has not seen, so its old total is not charged a second time.
+     */
+    fun spendSince(uid: String, install: String, spent: Int): Int = synchronized(lock) {
+        val seen = riders[uid]?.spentSeen?.get(install) ?: return 0
+        (spent - seen).coerceIn(0, 10_000)
+    }
+
+    fun countSpent(uid: String, install: String, spent: Int) {
+        synchronized(lock) {
+            val existing = riders[uid] ?: return
+            if (existing.spentSeen[install] == spent) return
+            // Newest last. A rider rarely has more than one or two phones.
+            val seen = (existing.spentSeen - install + (install to spent)).entries.toList().takeLast(8)
+            riders[uid] = existing.copy(spentSeen = seen.associate { it.key to it.value })
+            persist()
+        }
     }
 
     /** Drops the rider and remembers the id, so a later sign-in cannot write them back. */

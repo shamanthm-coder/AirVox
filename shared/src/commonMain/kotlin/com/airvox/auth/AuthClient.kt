@@ -12,13 +12,10 @@ data class RiderAccount(
     val signInProvider: String,
     val providers: List<String>,
     val profileComplete: Boolean = false,
-    /** Free credits given once, on this account's first sign-in. Later sessions send 0. */
-    val welcomeCredits: Int = 0,
-    /** Extra welcome credits to remove. 0 once the phone has taken them off. */
-    val balanceOffset: Int = 0,
-    /** Credits saved in the portal. 0 when this sign-in could not read them. */
-    val walletBalance: Int = 0,
 )
+
+/** The wallet the server holds. [spentCounted] is the phone's spent total it had already taken off. */
+data class ServerWallet(val balance: Int, val spentCounted: Int)
 
 enum class AuthPhase {
     Restoring,
@@ -32,8 +29,10 @@ data class AuthState(
     val error: String? = null,
     val configured: Boolean = false,
     val pendingSession: Boolean = false,
-    /** True only while a new account still needs a name and mobile. Sign-in leaves this false. */
+    /** True while the account still needs a name and mobile number. */
     val needsProfile: Boolean = false,
+    /** From the last check-in the server answered. Null until then. */
+    val wallet: ServerWallet? = null,
     /** This phone's sign-in was replaced. The account stays until the rider taps OK. */
     val signedInElsewhere: Boolean = false,
 )
@@ -62,16 +61,17 @@ interface AuthClient {
     fun refreshSession()
 
     /**
-     * Tells the Airvox API the signed-in rider still has the app open, and how many credits are on the phone.
+     * Tells the Airvox API the signed-in rider still has the app open, and every credit this install has used.
+     * The server's balance comes back in [AuthState.wallet].
      * [room] and [mode] are set while they are on a channel, so the portal can keep that channel live.
      */
-    fun heartbeat(credits: Int, room: String = "", mode: String = "", clearOffset: Boolean = false) = Unit
+    fun heartbeat(install: String, spent: Int, room: String = "", mode: String = "") = Unit
 
     /** A rider created or left a channel. The phone keeps it until the server accepts it. */
     fun reportChannel(room: String, mode: String, action: String) = Unit
 
-    /** Records credits spent on a channel ("consume") or a pack added ("purchase"). Quiet on failure. */
-    fun recordCredits(kind: String, credits: Int) = Unit
+    /** Adds a credit pack to the wallet on the server. Calls back on the main thread with whether it was saved. */
+    fun buyCredits(credits: Int, onResult: (Boolean) -> Unit) = onResult(false)
 
     /** Active plans from the portal. Calls back on the main thread. */
     fun loadPlans(onResult: (List<CreditPlan>) -> Unit) = onResult(emptyList())

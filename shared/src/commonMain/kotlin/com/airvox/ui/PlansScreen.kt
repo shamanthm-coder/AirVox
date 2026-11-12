@@ -49,7 +49,8 @@ fun PlansScreen(
     balance: CreditBalance,
     plans: List<CreditPlan>,
     onRefresh: () -> Unit,
-    onBuy: (Int) -> Unit,
+    /** Adds a pack on the server, then says whether it was saved. */
+    onBuy: (Int, (Boolean) -> Unit) -> Unit,
 ) {
     var note by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { onRefresh() }
@@ -142,8 +143,14 @@ fun PlansScreen(
             plans.forEach { plan ->
                 Button(
                     onClick = {
-                        onBuy(plan.credits)
-                        note = "Added ${plan.credits} credits for ₹${plan.rupees}."
+                        note = null
+                        onBuy(plan.credits) { saved ->
+                            note = if (saved) {
+                                "Added ${plan.credits} credits for ₹${plan.rupees}."
+                            } else {
+                                "Couldn't add these credits. Check your internet and try again."
+                            }
+                        }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
