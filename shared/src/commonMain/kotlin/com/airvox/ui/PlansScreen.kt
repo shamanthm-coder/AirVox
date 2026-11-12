@@ -48,11 +48,12 @@ fun PlansScreen(
     account: RiderAccount?,
     balance: CreditBalance,
     plans: List<CreditPlan>,
+    plansError: String? = null,
     onRefresh: () -> Unit,
     onBuy: (Int) -> Unit,
 ) {
     var note by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { onRefresh() }
+    LaunchedEffect(account?.id) { onRefresh() }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -76,6 +77,67 @@ fun PlansScreen(
             text = "Credits are the currency in Airvox. They are points, not a cash balance.",
             style = MaterialTheme.typography.bodyMedium,
         )
+        Spacer(Modifier.height(22.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Add credits", style = MaterialTheme.typography.titleMedium)
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clearAndSetSemantics {
+                        role = Role.Button
+                        contentDescription = "Refresh"
+                    }
+                    .clip(CircleShape)
+                    .background(AirvoxPalette.SurfaceHigh)
+                    .border(width = 1.dp, color = AirvoxPalette.Line, shape = CircleShape)
+                    .clickable(onClick = onRefresh),
+                contentAlignment = Alignment.Center,
+            ) {
+                RefreshIcon(tint = AirvoxPalette.White)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        if (plansError != null) {
+            Text(
+                text = plansError,
+                color = AirvoxPalette.Muted,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else if (plans.isEmpty()) {
+            Text(
+                text = "No plans yet. Add them in the Airvox portal.",
+                color = AirvoxPalette.Muted,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            plans.forEach { plan ->
+                Button(
+                    onClick = {
+                        onBuy(plan.credits)
+                        note = "Added ${plan.credits} credits for ₹${plan.rupees}."
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AirvoxPalette.White,
+                        contentColor = AirvoxPalette.Black,
+                    ),
+                ) {
+                    Text("${plan.credits} credits · ₹${plan.rupees}", fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+        note?.let { message ->
+            Spacer(Modifier.height(12.dp))
+            Text(text = message, color = AirvoxPalette.Muted, fontSize = 14.sp)
+        }
         Spacer(Modifier.height(22.dp))
         AirvoxCard {
             Text("Wallet", style = MaterialTheme.typography.titleMedium)
@@ -106,61 +168,6 @@ fun PlansScreen(
             UsageRow("Credits used", balance.spent.toString())
             Spacer(Modifier.height(8.dp))
             UsageRow("Credits left", balance.credits.toString())
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Add credits", style = MaterialTheme.typography.titleMedium)
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clearAndSetSemantics {
-                        role = Role.Button
-                        contentDescription = "Refresh"
-                    }
-                    .clip(CircleShape)
-                    .background(AirvoxPalette.SurfaceHigh)
-                    .border(width = 1.dp, color = AirvoxPalette.Line, shape = CircleShape)
-                    .clickable(onClick = onRefresh),
-                contentAlignment = Alignment.Center,
-            ) {
-                RefreshIcon(tint = AirvoxPalette.White)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        if (plans.isEmpty()) {
-            Text(
-                text = "No plans yet. Add them in the Airvox portal.",
-                color = AirvoxPalette.Muted,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            plans.forEach { plan ->
-                Button(
-                    onClick = {
-                        onBuy(plan.credits)
-                        note = "Added ${plan.credits} credits for ₹${plan.rupees}."
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AirvoxPalette.White,
-                        contentColor = AirvoxPalette.Black,
-                    ),
-                ) {
-                    Text("${plan.credits} credits · ₹${plan.rupees}", fontWeight = FontWeight.Medium)
-                }
-            }
-        }
-        note?.let { message ->
-            Spacer(Modifier.height(12.dp))
-            Text(text = message, color = AirvoxPalette.Muted, fontSize = 14.sp)
         }
     }
 }

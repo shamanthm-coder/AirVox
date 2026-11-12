@@ -163,16 +163,19 @@ class IosAuthClient(
         }
     }
 
-    override fun loadPlans(onResult: (List<CreditPlan>) -> Unit) {
+    override fun loadPlans(onResult: (List<CreditPlan>, String?) -> Unit) {
         if (tokens == null || _state.value.account == null) {
-            onResult(emptyList())
+            onResult(emptyList(), "Sign in again to load plans.")
             return
         }
         scope.launch {
-            val plans = runCatching {
+            val outcome = runCatching {
                 val reply = send("GET", "$baseUrl/v1/plans", idToken(), body = null)
                 val parsed = parse(reply.body)
-                if (reply.status !in 200..299 || parsed == null) return@runCatching emptyList()
+                if (reply.status !in 200..299 || parsed == null) {
+                    val message = parsed?.string("message") ?: "Plans didn't load (${reply.status})."
+                    return@runCatching emptyList<CreditPlan>() to message
+                }
                 parsed["plans"]!!.jsonArray.map { item ->
                     val plan = item.jsonObject
                     val credits = plan.string("credits")?.toIntOrNull() ?: 0
@@ -182,9 +185,9 @@ class IosAuthClient(
                         credits = credits,
                         rupees = plan.string("rupees")?.toIntOrNull() ?: credits,
                     )
-                }.filter { it.credits > 0 && it.rupees > 0 && it.name.isNotBlank() }
-            }.getOrDefault(emptyList())
-            onResult(plans)
+                }.filter { it.credits > 0 && it.rupees > 0 && it.name.isNotBlank() } to null
+            }.getOrElse { emptyList<CreditPlan>() to "Can't reach the Airvox server." }
+            onResult(outcome.first, outcome.second)
         }
     }
 

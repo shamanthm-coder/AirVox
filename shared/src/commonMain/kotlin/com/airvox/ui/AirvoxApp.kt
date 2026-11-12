@@ -75,6 +75,7 @@ fun AirvoxApp(
     var destination by remember(signedInId) { mutableStateOf(Destination.Channel) }
     val channelForm = remember(signedInId) { ChannelFormState() }
     var plans by remember { mutableStateOf<List<CreditPlan>>(emptyList()) }
+    var plansError by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     var locationAnswered by remember { mutableStateOf(false) }
     val authState = auth.state.value
@@ -123,25 +124,24 @@ fun AirvoxApp(
     var walletReady by remember { mutableStateOf<String?>(null) }
     var clearOffset by remember { mutableStateOf(false) }
     LaunchedEffect(signedIn?.id, signedIn?.welcomeCredits, signedIn?.balanceOffset, signedIn?.walletBalance) {
-        val account = signedIn
-        if (account == null) {
+        if (signedIn == null) {
             walletReady = null
             return@LaunchedEffect
         }
-        bindWallet(account.id)
-        if (account.welcomeCredits > 0) wallet.add(account.welcomeCredits)
-        if (account.balanceOffset > 0) {
-            if (!offsetAlreadyRemoved(account.id, account.balanceOffset)) {
-                wallet.remove(account.balanceOffset)
-                markOffsetRemoved(account.id, account.balanceOffset)
+        bindWallet(signedIn.id)
+        if (signedIn.welcomeCredits > 0) wallet.add(signedIn.welcomeCredits)
+        if (signedIn.balanceOffset > 0) {
+            if (!offsetAlreadyRemoved(signedIn.id, signedIn.balanceOffset)) {
+                wallet.remove(signedIn.balanceOffset)
+                markOffsetRemoved(signedIn.id, signedIn.balanceOffset)
             }
             clearOffset = true
         }
         // The portal keeps the balance. An empty phone must take that number, not push 0 back.
-        if (account.walletBalance > wallet.state.value.credits) {
-            wallet.adopt(account.walletBalance)
+        if (signedIn.walletBalance > wallet.state.value.credits) {
+            wallet.adopt(signedIn.walletBalance)
         }
-        walletReady = account.id
+        walletReady = signedIn.id
     }
     val shownCredits = wallet.state.value.credits
     LaunchedEffect(signedIn?.id, shownCredits, walletReady) {
@@ -286,7 +286,13 @@ fun AirvoxApp(
                     account = auth.state.value.account,
                     balance = wallet.state.value,
                     plans = plans,
-                    onRefresh = { auth.loadPlans { plans = it } },
+                    plansError = plansError,
+                    onRefresh = {
+                        auth.loadPlans { loaded, error ->
+                            plans = loaded
+                            plansError = error
+                        }
+                    },
                     onBuy = { pack ->
                         wallet.add(pack)
                         auth.recordCredits("purchase", pack)

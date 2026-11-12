@@ -73,8 +73,8 @@ interface AuthClient {
     /** Records credits spent on a channel ("consume") or a pack added ("purchase"). Quiet on failure. */
     fun recordCredits(kind: String, credits: Int) = Unit
 
-    /** Active plans from the portal. Calls back on the main thread. */
-    fun loadPlans(onResult: (List<CreditPlan>) -> Unit) = onResult(emptyList())
+    /** Active plans from the portal. [error] is set when the list could not be loaded. Calls back on the main thread. */
+    fun loadPlans(onResult: (plans: List<CreditPlan>, error: String?) -> Unit) = onResult(emptyList(), null)
 
     fun signOut()
 

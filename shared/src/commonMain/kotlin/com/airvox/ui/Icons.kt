@@ -2,6 +2,7 @@ package com.airvox.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -14,6 +15,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.airvox.generated.resources.Res
+import com.airvox.generated.resources.eye
+import com.airvox.generated.resources.eye_off
+import com.airvox.generated.resources.refresh
+import org.jetbrains.compose.resources.painterResource
 
 @Composable
 fun ChannelIcon(tint: Color, modifier: Modifier = Modifier) {
@@ -127,26 +133,12 @@ fun SosIcon(tint: Color, modifier: Modifier = Modifier) {
 
 @Composable
 fun EyeIcon(visible: Boolean, tint: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier.size(22.dp)) {
-        val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
-        val center = Offset(size.width / 2f, size.height / 2f)
-        drawOval(
-            color = tint,
-            topLeft = Offset(2.dp.toPx(), 6.2.dp.toPx()),
-            size = Size(size.width - 4.dp.toPx(), 9.6.dp.toPx()),
-            style = stroke,
-        )
-        drawCircle(color = tint, radius = 2.1.dp.toPx(), center = center)
-        if (visible) {
-            drawLine(
-                color = tint,
-                start = Offset(4.dp.toPx(), size.height - 4.5.dp.toPx()),
-                end = Offset(size.width - 4.dp.toPx(), 4.5.dp.toPx()),
-                strokeWidth = 1.7.dp.toPx(),
-                cap = StrokeCap.Round,
-            )
-        }
-    }
+    Icon(
+        painter = painterResource(if (visible) Res.drawable.eye_off else Res.drawable.eye),
+        contentDescription = null,
+        tint = tint,
+        modifier = modifier.size(22.dp),
+    )
 }
 
 @Composable
@@ -215,35 +207,12 @@ fun FullScreenIcon(exit: Boolean, tint: Color, modifier: Modifier = Modifier) {
 
 @Composable
 fun RefreshIcon(tint: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier.size(22.dp)) {
-        val stroke = 1.7.dp.toPx()
-        val inset = 3.4.dp.toPx()
-        drawArc(
-            color = tint,
-            startAngle = 45f,
-            sweepAngle = 270f,
-            useCenter = false,
-            topLeft = Offset(inset, inset),
-            size = Size(size.width - inset * 2, size.height - inset * 2),
-            style = Stroke(width = stroke, cap = StrokeCap.Round),
-        )
-        val tip = Offset(size.width - 4.6.dp.toPx(), 6.4.dp.toPx())
-        val arm = 4.4.dp.toPx()
-        drawLine(
-            color = tint,
-            start = Offset(tip.x - arm, tip.y),
-            end = tip,
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = tint,
-            start = tip,
-            end = Offset(tip.x, tip.y + arm),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-    }
+    Icon(
+        painter = painterResource(Res.drawable.refresh),
+        contentDescription = null,
+        tint = tint,
+        modifier = modifier.size(22.dp),
+    )
 }
 
 @Composable

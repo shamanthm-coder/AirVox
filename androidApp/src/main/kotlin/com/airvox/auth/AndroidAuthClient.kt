@@ -220,15 +220,16 @@ class AndroidAuthClient(
         }
     }
 
-    override fun loadPlans(onResult: (List<CreditPlan>) -> Unit) {
+    override fun loadPlans(onResult: (List<CreditPlan>, String?) -> Unit) {
         val user = firebase?.currentUser
         if (user == null || _state.value.account == null) {
-            onResult(emptyList())
+            onResult(emptyList(), "Sign in again to load plans.")
             return
         }
         scope.launch {
-            val plans = runCatching {
-                val token = user.getIdToken(false).await().token ?: return@runCatching emptyList()
+            val outcome = runCatching {
+                val token = user.getIdToken(false).await().token
+                    ?: return@runCatching emptyList<CreditPlan>() to "Sign in again to load plans."
                 withContext(Dispatchers.IO) {
                     val request = Request.Builder()
                         .url("$baseUrl/v1/plans")
@@ -236,8 +237,14 @@ class AndroidAuthClient(
                         .get()
                         .build()
                     http.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) return@withContext emptyList()
-                        val array = JSONObject(response.body?.string().orEmpty()).optJSONArray("plans") ?: JSONArray()
+                        val text = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) {
+                            val message = runCatching { JSONObject(text).optString("message") }.getOrNull()
+                                ?.takeIf { it.isNotBlank() }
+                                ?: "Plans didn't load (${response.code})."
+                            return@withContext emptyList<CreditPlan>() to message
+                        }
+                        val array = JSONObject(text).optJSONArray("plans") ?: JSONArray()
                         buildList {
                             for (index in 0 until array.length()) {
                                 val plan = array.getJSONObject(index)
@@ -250,11 +257,11 @@ class AndroidAuthClient(
                                     ),
                                 )
                             }
-                        }
+                        } to null
                     }
                 }
-            }.getOrDefault(emptyList())
-            onResult(plans)
+            }.getOrElse { emptyList<CreditPlan>() to "Can't reach the Airvox server at $baseUrl." }
+            onResult(outcome.first, outcome.second)
         }
     }
 

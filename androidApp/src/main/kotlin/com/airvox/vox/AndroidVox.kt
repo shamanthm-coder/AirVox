@@ -99,17 +99,9 @@ class AndroidVox(
         pendingPassword = password
         pendingPath = path
         heldOff = false
-        val room = normalize(roomCode)
-        val secret = password.trim().take(32)
-        if (room.length < 3) {
-            publish(VoxPhase.Ready, "Vox needs a room code with at least 3 letters or numbers.")
-            return
-        }
-        if (secret.length < 4) {
-            publish(VoxPhase.Ready, "Vox needs a password with at least 4 characters. Both phones use the same one.")
-            return
-        }
-        session.join(room, path, secret)
+        // The channel screen shows the session's reason. Stopping here hides a short
+        // room code or password, because that line is only drawn while Vox is on.
+        session.join(roomCode, path, password)
         sync()
     }
 
@@ -367,10 +359,6 @@ class AndroidVox(
     private fun publish(phase: VoxPhase, line: String) {
         val next = VoxState(enabled = enabled, phase = phase, line = line)
         if (next != stateHolder.value) stateHolder.value = next
-    }
-
-    private fun normalize(room: String): String {
-        return room.trim().lowercase().filter { it.isLetterOrDigit() }.take(16)
     }
 
     private class Mic(val recorder: AudioRecord, val inputRate: Int)

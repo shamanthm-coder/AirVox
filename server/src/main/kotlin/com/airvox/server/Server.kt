@@ -187,8 +187,11 @@ fun Application.airvoxApi(
             val identity = verifier.verify(call.requireToken())
             if (call.stopIfDeleted(store, identity.uid)) return@get
             try {
-                call.respond(PlansResponse(sync.activePlans()))
-            } catch (_: Exception) {
+                val plans = sync.activePlans()
+                println("GET /v1/plans -> ${plans.size}")
+                call.respond(PlansResponse(plans))
+            } catch (error: Exception) {
+                System.err.println("GET /v1/plans failed: ${error.javaClass.simpleName}: ${error.message}")
                 call.respond(
                     HttpStatusCode.ServiceUnavailable,
                     ApiError("plans_unavailable", "Plans aren't available yet."),
