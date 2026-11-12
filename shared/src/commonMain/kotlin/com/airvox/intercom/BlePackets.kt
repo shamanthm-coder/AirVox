@@ -30,6 +30,20 @@ object BlePackets {
         return packets
     }
 
+    /** Each piece stands alone, so a lost piece does not throw away the rest of the voice. */
+    fun packSolo(type: Byte, payload: ByteArray, maxPacket: Int): List<ByteArray> {
+        val room = (maxPacket - 4).coerceAtLeast(8)
+        if (payload.isEmpty()) return emptyList()
+        val packets = ArrayList<ByteArray>()
+        var offset = 0
+        while (offset < payload.size) {
+            val end = (offset + room).coerceAtMost(payload.size)
+            packets += frame(type, end = true, seq = 0, chunk = payload.copyOfRange(offset, end))
+            offset = end
+        }
+        return packets
+    }
+
     private fun frame(type: Byte, end: Boolean, seq: Int, chunk: ByteArray): ByteArray {
         val packet = ByteArray(4 + chunk.size)
         packet[0] = type
@@ -50,6 +64,11 @@ object BlePackets {
             val kind = packet[0]
             val end = packet[1].toInt() and 0x01 != 0
             val seq = ((packet[2].toInt() and 0xFF) shl 8) or (packet[3].toInt() and 0xFF)
+            // A voice piece is whole on its own. It can land between the pieces of a longer
+            // message, and must not make the phone forget the message it is collecting.
+            if (seq == 0 && end && kind != type && expect > 0) {
+                return kind to packet.copyOfRange(4, packet.size)
+            }
             if (seq == 0) {
                 type = kind
                 body = ByteArray(0)

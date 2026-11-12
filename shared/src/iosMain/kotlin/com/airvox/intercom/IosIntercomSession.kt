@@ -261,7 +261,7 @@ class IosIntercomSession(
         }
         localTalking = talking
         if (path == ChannelPath.Bluetooth) {
-            bleVoice.mutePlayback(talking)
+            // Both people can talk at once. The other phone keeps playing while this one talks.
             if (talking) bleVoice.startCapture() else bleVoice.stopCapture()
             sendSignal(buildJsonObject {
                 put("kind", "talk")

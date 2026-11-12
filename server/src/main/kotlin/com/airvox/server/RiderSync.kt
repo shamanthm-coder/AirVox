@@ -4,7 +4,10 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -61,6 +64,12 @@ fun interface RiderSync {
 
     /** Ends channels nobody has checked in on for five minutes. */
     fun closeStaleChannels() = Unit
+
+    /**
+     * Staff closed this channel from the portal.
+     * True when it was still open and is now ended.
+     */
+    fun stopChannel(channelId: String): Boolean = false
 }
 
 object NoRiderSync : RiderSync {
@@ -78,10 +87,39 @@ object NoRiderSync : RiderSync {
 class SupabaseRiderSync(
     supabaseUrl: String,
     private val serviceKey: String,
+    private val stoppedRoomsFile: Path = Path.of(System.getenv("AIRVOX_DATA") ?: "data").resolve("stopped-rooms.txt"),
 ) : RiderSync {
     private val restUrl = supabaseUrl.trim().trimEnd('/') + "/rest/v1"
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "supabase-sync").apply { isDaemon = true } }
+    private val stoppedRooms = ConcurrentHashMap<String, StaffStop>()
+    private val stoppedGate = Any()
+
+    init {
+        if (Files.isRegularFile(stoppedRoomsFile)) {
+            val now = java.time.Instant.now()
+            Files.readAllLines(stoppedRoomsFile).forEach { line ->
+                val parts = line.trim().split("|")
+                if (parts.size < 2 || parts[0].isBlank() || parts[1].isBlank()) return@forEach
+                val stoppedAt = parts.getOrNull(2)?.toLongOrNull()?.let(java.time.Instant::ofEpochMilli) ?: now
+                stoppedRooms[roomKey(parts[0], parts[1])] = StaffStop(parts[0], parts[1], stoppedAt, now)
+            }
+            if (stoppedRooms.isNotEmpty()) writeStopped()
+        }
+        Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    sweepStoppedRooms()
+                    Thread.sleep(1_000)
+                } catch (_: InterruptedException) {
+                    break
+                } catch (error: Exception) {
+                    System.err.println("Channel stop sweep failed: ${error.message}")
+                    Thread.sleep(1_000)
+                }
+            }
+        }, "channel-stop").apply { isDaemon = true }.start()
+    }
 
     override fun riderSeen(rider: Rider, platform: String?) {
         worker.execute {
@@ -207,10 +245,14 @@ class SupabaseRiderSync(
         val open = openChannel(room, mode)
         if (action == "leave") {
             if (open != null) leaveChannel(open.id, userId, whenAt)
+        } else if (open == null && action == "here" && isStopped(room, mode)) {
+            // Staff closed this room while riders were still in it. A check-in must not open a new row.
         } else if (open == null) {
+            if (action == "join") clearStopped(room, mode)
             val created = createChannel(userId, room, mode, whenAt, now)
             joinMember(created, userId, whenAt, now)
         } else {
+            if (action == "join") clearStopped(room, mode)
             val joined = runCatching { java.time.Instant.parse(whenAt) }.getOrNull()
             val started = runCatching { java.time.Instant.parse(open.startedAt) }.getOrNull()
             if (action == "join" && joined != null && started != null && joined.isBefore(started)) {
@@ -231,6 +273,33 @@ class SupabaseRiderSync(
             joinMember(open.id, userId, whenAt, now)
         }
         closeStaleChannels()
+    }
+
+    override fun stopChannel(channelId: String): Boolean {
+        if (!CHANNEL_ID.matches(channelId)) return false
+        val saved = get("channels?id=eq.$channelId&select=id,room,mode,ended_at")
+        val rows = Json.parseToJsonElement(saved).jsonArray
+        if (rows.isEmpty()) return false
+        val row = rows.first().jsonObject
+        if (row["ended_at"].textOrNull() != null) return false
+        val room = row["room"]!!.jsonPrimitive.content
+        val mode = row["mode"]!!.jsonPrimitive.content
+        val now = java.time.Instant.now().toString()
+        send(
+            "channel_members?channel_id=eq.$channelId&left_at=is.null",
+            """{"left_at":"$now","last_seen_at":"$now"}""",
+            prefer = "return=minimal",
+            method = "PATCH",
+        )
+        val updated = send(
+            "channels?id=eq.$channelId&ended_at=is.null&select=id",
+            """{"ended_at":"$now"}""",
+            prefer = "return=representation",
+            method = "PATCH",
+        )
+        if (Json.parseToJsonElement(updated).jsonArray.isEmpty()) return false
+        markStopped(room, mode)
+        return true
     }
 
     override fun closeStaleChannels() {
@@ -395,7 +464,121 @@ class SupabaseRiderSync(
         return response.body()
     }
 
+    private fun isStopped(room: String, mode: String): Boolean = stoppedRooms.containsKey(roomKey(room, mode))
+
+    private fun markStopped(room: String, mode: String) {
+        synchronized(stoppedGate) {
+            val now = java.time.Instant.now()
+            stoppedRooms[roomKey(room, mode)] = StaffStop(room, mode, now, now)
+            writeStopped()
+        }
+    }
+
+    private fun clearStopped(room: String, mode: String) {
+        synchronized(stoppedGate) {
+            if (stoppedRooms.remove(roomKey(room, mode)) == null) return
+            writeStopped()
+        }
+    }
+
+    /**
+     * The phone API that is already running opens a room again on the next check-in.
+     * End the original row, and drop the copies it creates while riders are still in the room.
+     * A room that has been quiet for two minutes can be opened again.
+     */
+    private fun sweepStoppedRooms() {
+        val snapshot = stoppedRooms.values.toList()
+        for (stop in snapshot) {
+            val current = stoppedRooms[roomKey(stop.room, stop.mode)] ?: continue
+            if (current.stoppedAt != stop.stoppedAt) continue
+            val open = openRow(stop.room, stop.mode) ?: continue
+            val quiet = java.time.Duration.between(stop.lastClosedAt, open.startedAt)
+            if (!quiet.isNegative && quiet.seconds >= 120) {
+                clearStopped(stop.room, stop.mode)
+                continue
+            }
+            if (open.startedAt.isBefore(stop.stoppedAt)) {
+                endOpen(open.id)
+            } else {
+                removeOpen(open.id)
+            }
+            val closed = java.time.Instant.now()
+            synchronized(stoppedGate) {
+                val current = stoppedRooms[roomKey(stop.room, stop.mode)] ?: return@synchronized
+                stoppedRooms[roomKey(stop.room, stop.mode)] = current.copy(lastClosedAt = closed)
+                writeStopped()
+            }
+        }
+    }
+
+    private fun openRow(room: String, mode: String): OpenRow? {
+        val saved = get(
+            "channels?room=eq.${encode(room)}&mode=eq.${encode(mode)}&ended_at=is.null&select=id,started_at&limit=1",
+        )
+        val rows = Json.parseToJsonElement(saved).jsonArray
+        if (rows.isEmpty()) return null
+        val row = rows.first().jsonObject
+        val started = runCatching { java.time.Instant.parse(row["started_at"]!!.jsonPrimitive.content) }.getOrNull()
+            ?: return null
+        return OpenRow(row["id"]!!.jsonPrimitive.content, started)
+    }
+
+    private fun endOpen(channelId: String) {
+        val now = java.time.Instant.now().toString()
+        send(
+            "channel_members?channel_id=eq.$channelId&left_at=is.null",
+            """{"left_at":"$now","last_seen_at":"$now"}""",
+            prefer = "return=minimal",
+            method = "PATCH",
+        )
+        send(
+            "channels?id=eq.$channelId&ended_at=is.null",
+            """{"ended_at":"$now"}""",
+            prefer = "return=minimal",
+            method = "PATCH",
+        )
+    }
+
+    private fun removeOpen(channelId: String) {
+        send(
+            "channel_members?channel_id=eq.$channelId",
+            "",
+            prefer = "return=minimal",
+            method = "DELETE",
+        )
+        send(
+            "channels?id=eq.$channelId",
+            "",
+            prefer = "return=minimal",
+            method = "DELETE",
+        )
+    }
+
+    private fun writeStopped() {
+        val parent = stoppedRoomsFile.parent
+        if (parent != null) Files.createDirectories(parent)
+        val lines = stoppedRooms.values.joinToString("\n") { stop ->
+            "${stop.room}|${stop.mode}|${stop.stoppedAt.toEpochMilli()}|${stop.lastClosedAt.toEpochMilli()}"
+        }
+        Files.writeString(stoppedRoomsFile, lines)
+    }
+
+    private fun roomKey(room: String, mode: String): String = "$room|$mode"
+
+    private data class StaffStop(
+        val room: String,
+        val mode: String,
+        val stoppedAt: java.time.Instant,
+        val lastClosedAt: java.time.Instant,
+    )
+
+    private data class OpenRow(val id: String, val startedAt: java.time.Instant)
+
     private fun encode(value: String): String = java.net.URLEncoder.encode(value, Charsets.UTF_8)
+
+    private companion object {
+        val CHANNEL_ID = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    }
 }
 
 private fun JsonElement?.textOrNull(): String? {

@@ -512,6 +512,30 @@ class AuthApiTest {
     }
 
     @Test
+    fun staffCanStopALiveChannel() {
+        val stopped = mutableListOf<String>()
+        val sync = object : RiderSync {
+            override fun riderSeen(rider: Rider, platform: String?) = Unit
+            override fun stopChannel(channelId: String): Boolean {
+                if (channelId != "33333333-3333-3333-3333-333333333333") return false
+                stopped += channelId
+                return true
+            }
+        }
+        withApi(sync = sync, staff = { it == "staff" }) {
+            val denied = client.post("/v1/channels/33333333-3333-3333-3333-333333333333/stop") { bearer("good") }
+            assertEquals(HttpStatusCode.Forbidden, denied.status)
+            val bad = client.post("/v1/channels/not-an-id/stop") { bearer("staff") }
+            assertEquals(HttpStatusCode.BadRequest, bad.status)
+            val missing = client.post("/v1/channels/22222222-2222-2222-2222-222222222222/stop") { bearer("staff") }
+            assertEquals(HttpStatusCode.Conflict, missing.status)
+            val gone = client.post("/v1/channels/33333333-3333-3333-3333-333333333333/stop") { bearer("staff") }
+            assertEquals(HttpStatusCode.NoContent, gone.status)
+        }
+        assertEquals(listOf("33333333-3333-3333-3333-333333333333"), stopped)
+    }
+
+    @Test
     fun deletedRiderStaysOffTheServer() {
         val dir = createTempDirectory("airvox-riders")
         val file = dir.resolve("riders.json")

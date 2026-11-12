@@ -60,6 +60,7 @@ class AndroidIntercomSession(
     @Volatile var onMicLevel: ((Int) -> Unit)? = null
 
     private val bluetoothVoice = BluetoothVoice(
+        context = activity.applicationContext,
         onFrame = { frame ->
             nearby?.sendAudio(frame)
             ble?.sendAudio(frame)
@@ -181,7 +182,7 @@ class AndroidIntercomSession(
         }
         localTalking = talking
         if (path == ChannelPath.Bluetooth) {
-            bluetoothVoice.mutePlayback(talking)
+            // Both people can talk at once. The other phone keeps playing while this one talks.
             if (talking) {
                 refreshVoice()
                 bluetoothVoice.startCapture()
@@ -800,6 +801,16 @@ class AndroidIntercomSession(
     private fun startVoiceRoute() {
         if (routeActive) return
         routeActive = true
+        if (path == ChannelPath.Bluetooth) {
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = true
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (max > 0 && current < max / 2) {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, (max / 2).coerceAtLeast(1), 0)
+            }
+            return
+        }
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         val bluetooth = bluetoothRoute()
         if (bluetooth != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -828,6 +839,11 @@ class AndroidIntercomSession(
         mainHandler.postDelayed({
             if (!routeActive) audioManager.mode = AudioManager.MODE_NORMAL
         }, 400)
+    }
+
+    private fun speakerDevice(): AudioDeviceInfo? {
+        return audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
     }
 
     private fun bluetoothRoute(): AudioDeviceInfo? {

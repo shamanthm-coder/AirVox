@@ -228,6 +228,38 @@ fun Application.airvoxApi(
                 )
             }
         }
+        post("/v1/channels/{id}/stop") {
+            if (!staff.allow(call.requireToken())) {
+                call.respond(
+                    HttpStatusCode.Forbidden,
+                    ApiError("not_staff", "Your account isn't allowed to stop channels."),
+                )
+                return@post
+            }
+            val id = call.parameters["id"].orEmpty()
+            if (!RIDER_ID.matches(id)) {
+                call.respond(HttpStatusCode.BadRequest, ApiError("invalid_channel", "That channel id is not valid."))
+                return@post
+            }
+            val stopped = try {
+                sync.stopChannel(id)
+            } catch (error: Exception) {
+                System.err.println("Channel stop failed: ${error.message}")
+                call.respond(
+                    HttpStatusCode.BadGateway,
+                    ApiError("stop_failed", "Couldn't stop this channel. Try again."),
+                )
+                return@post
+            }
+            if (!stopped) {
+                call.respond(
+                    HttpStatusCode.Conflict,
+                    ApiError("already_ended", "This channel already ended."),
+                )
+                return@post
+            }
+            call.respond(HttpStatusCode.NoContent)
+        }
         post("/v1/credits") {
             val identity = verifier.verify(call.requireToken())
             if (call.stopIfDeleted(store, identity.uid)) return@post

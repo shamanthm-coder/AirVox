@@ -1,10 +1,15 @@
 package com.airvox.intercom
 
+import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.os.Build
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
@@ -14,6 +19,7 @@ import kotlin.math.max
  * 8 kHz G.711 is small enough to ride a Bluetooth link.
  */
 class BluetoothVoice(
+    private val context: Context,
     private val onFrame: (ByteArray) -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -23,8 +29,9 @@ class BluetoothVoice(
     @Volatile private var playbackRunning = false
 
     private val lock = Any()
-    private val incoming = ArrayBlockingQueue<ByteArray>(8)
+    private val incoming = ArrayBlockingQueue<ByteArray>(12)
     private var recorder: AudioRecord? = null
+    private var echo: AcousticEchoCanceler? = null
     private var captureThread: Thread? = null
     private var playbackThread: Thread? = null
     @Volatile private var playbackGeneration = 0
@@ -53,6 +60,15 @@ class BluetoothVoice(
             }
             capturing = true
             recorder = mic.recorder
+            // With both people talking, the speaker's sound reaches the microphone.
+            // Ask the phone to take it out, where the phone can.
+            echo = runCatching {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    AcousticEchoCanceler.create(mic.recorder.audioSessionId)?.also { it.enabled = true }
+                } else {
+                    null
+                }
+            }.getOrNull()
             try {
                 mic.recorder.startRecording()
             } catch (error: IllegalStateException) {
@@ -75,6 +91,8 @@ class BluetoothVoice(
             captureThread = null
             rec = recorder
             recorder = null
+            runCatching { echo?.release() }
+            echo = null
         }
         if (rec != null) {
             runCatching {
@@ -144,17 +162,35 @@ class BluetoothVoice(
         }
         try {
             track.play()
+            var primed = false
             while (playbackRunning && generation == playbackGeneration) {
                 val frame = try {
                     incoming.poll(200, TimeUnit.MILLISECONDS)
                 } catch (_: InterruptedException) {
                     break
-                } ?: continue
+                }
+                if (frame == null) {
+                    primed = false
+                    continue
+                }
+                if (!primed) {
+                    // Start of someone talking. Hold a few frames first, so voice that
+                    // arrives in uneven bursts, as it does from an iPhone, is not chopped.
+                    primed = true
+                    val deadline = System.currentTimeMillis() + PREFILL_WAIT_MS
+                    try {
+                        while (incoming.size < PREFILL_FRAMES && System.currentTimeMillis() < deadline) {
+                            Thread.sleep(10)
+                        }
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
                 val pcm = ShortArray(frame.size)
                 for (index in frame.indices) {
                     pcm[index] = decodeMulaw(frame[index])
                 }
-                track.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                track.write(pcm, 0, pcm.size)
             }
         } finally {
             runCatching { track.pause() }
@@ -167,26 +203,43 @@ class BluetoothVoice(
     }
 
     private fun openMic(): Mic? {
-        for (rate in intArrayOf(8000, 16000)) {
-            val min = AudioRecord.getMinBufferSize(
-                rate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-            )
-            if (min <= 0) continue
-            val recorder = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                rate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                min * 2,
-            )
-            if (recorder.state == AudioRecord.STATE_INITIALIZED) {
-                return Mic(recorder, rate)
+        // The call source is silenced by the speakerphone processor on this phone.
+        // The plain microphone still hears the person talking.
+        val sources = intArrayOf(
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+        )
+        val input = builtinMic()
+        for (source in sources) {
+            for (rate in intArrayOf(8000, 16000)) {
+                val min = AudioRecord.getMinBufferSize(
+                    rate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                )
+                if (min <= 0) continue
+                val recorder = AudioRecord(
+                    source,
+                    rate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    min * 2,
+                )
+                if (recorder.state == AudioRecord.STATE_INITIALIZED) {
+                    input?.let { recorder.setPreferredDevice(it) }
+                    return Mic(recorder, rate)
+                }
+                recorder.release()
             }
-            recorder.release()
         }
         return null
+    }
+
+    private fun builtinMic(): AudioDeviceInfo? {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return manager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
     }
 
     private fun openPlayer(): AudioTrack? {
@@ -199,7 +252,7 @@ class BluetoothVoice(
         val track = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build(),
             )
@@ -211,13 +264,35 @@ class BluetoothVoice(
                     .build(),
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(max(min, 8000))
+            .setBufferSizeInBytes(max(min, 3200))
             .build()
         if (track.state != AudioTrack.STATE_INITIALIZED) {
             track.release()
             return null
         }
+        // By default the speaker stays silent until the whole buffer is full. That was half
+        // a second of voice, so a short or broken-up sentence was never heard at all.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { track.setStartThresholdInFrames(START_FRAMES.coerceAtMost(track.bufferSizeInFrames)) }
+        }
+        val speaker = speakerDevice()
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        manager.mode = AudioManager.MODE_NORMAL
+        manager.isSpeakerphoneOn = true
+        val max = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val current = manager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (max > 0 && current < max / 2) {
+            manager.setStreamVolume(AudioManager.STREAM_MUSIC, (max / 2).coerceAtLeast(1), 0)
+        }
+        speaker?.let { track.setPreferredDevice(it) }
+        track.setVolume(1f)
         return track
+    }
+
+    private fun speakerDevice(): AudioDeviceInfo? {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
     }
 
     private fun levelOf(pcm: ShortArray): Int {
@@ -270,6 +345,9 @@ class BluetoothVoice(
     private class Mic(val recorder: AudioRecord, val inputRate: Int)
 
     private companion object {
-        const val FRAME_MS = 60
+        const val FRAME_MS = 20
+        const val PREFILL_FRAMES = 3
+        const val PREFILL_WAIT_MS = 100L
+        const val START_FRAMES = 320
     }
 }
